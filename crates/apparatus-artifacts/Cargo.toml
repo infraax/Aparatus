@@ -1,0 +1,9 @@
+[package]
+name = "apparatus-artifacts"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+apparatus-types = { path = "../apparatus-types" }
+apparatus-crypto = { path = "../apparatus-crypto" }
+thiserror.workspace = true

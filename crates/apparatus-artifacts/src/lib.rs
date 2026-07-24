@@ -6,6 +6,7 @@
 use apparatus_crypto::{CryptoError, Sha256Digest};
 use apparatus_types::ObjectHeader;
 use std::path::PathBuf;
+use std::str::FromStr;
 use thiserror::Error;
 
 /// Artifact-related errors.
@@ -13,6 +14,18 @@ use thiserror::Error;
 pub enum ArtifactError {
     #[error("Crypto error: {0}")]
     Crypto(#[from] CryptoError),
+    #[error("Artifact path is absolute; must be relative")]
+    AbsolutePath,
+    #[error("Artifact path contains unsupported directory separators")]
+    InvalidSeparator,
+    #[error("Artifact path component count mismatch, expected {0}")]
+    InvalidComponentCount(usize),
+    #[error("Artifact path has incorrect prefix, expected {expected}")]
+    InvalidPrefix { expected: String },
+    #[error("Artifact path shard mismatch")]
+    ShardMismatch,
+    #[error("Artifact path contains traversals like '.' or '..'")]
+    PathTraversal,
 }
 
 /// Immutable descriptor for an artifact.
@@ -40,17 +53,40 @@ pub fn derive_cas_path(digest: &Sha256Digest) -> PathBuf {
 
 /// Validates a CAS path and extracts the hash.
 pub fn validate_and_extract_hash_from_cas_path(path: &str) -> Result<Sha256Digest, ArtifactError> {
+    if path.contains('\\') {
+        return Err(ArtifactError::InvalidSeparator);
+    }
+    if path.starts_with('/') {
+        return Err(ArtifactError::AbsolutePath);
+    }
+    if path.contains("/../")
+        || path.contains("/./")
+        || path.ends_with("/..")
+        || path.ends_with("/.")
+        || path.starts_with("../")
+        || path.starts_with("./")
+    {
+        return Err(ArtifactError::PathTraversal);
+    }
+
     let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() != 4 || parts[0] != "sha256" {
-        return Err(ArtifactError::Crypto(CryptoError::InvalidLength { expected: 4, actual: parts.len() })); // roughly indicating format error
+    if parts.len() != 4 {
+        return Err(ArtifactError::InvalidComponentCount(4));
+    }
+    if parts[0] != "sha256" {
+        return Err(ArtifactError::InvalidPrefix {
+            expected: "sha256".to_string(),
+        });
     }
 
     let hex = parts[3];
-    if hex.len() != 64 || &hex[0..2] != parts[1] || &hex[2..4] != parts[2] {
-        return Err(ArtifactError::Crypto(CryptoError::InvalidHex));
+    let digest = Sha256Digest::from_str(hex)?;
+
+    if &hex[0..2] != parts[1] || &hex[2..4] != parts[2] {
+        return Err(ArtifactError::ShardMismatch);
     }
 
-    Ok(Sha256Digest::from_hex(hex)?)
+    Ok(digest)
 }
 
 #[cfg(test)]
@@ -59,20 +95,61 @@ mod tests {
 
     #[test]
     fn test_cas_path_derivation() {
-        // "hello world" hash
-        let digest = Sha256Digest::from_hex("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9").unwrap();
+        let digest = Sha256Digest::from_str(
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+        )
+        .unwrap();
         let path = derive_cas_path(&digest);
-        assert_eq!(path.to_str().unwrap(), "sha256/b9/4d/b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+        assert_eq!(
+            path.to_str().unwrap(),
+            "sha256/b9/4d/b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
     }
 
     #[test]
     fn test_cas_path_validation() {
-        let valid_path = "sha256/b9/4d/b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        let valid_path =
+            "sha256/b9/4d/b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
         let digest = validate_and_extract_hash_from_cas_path(valid_path).unwrap();
-        assert_eq!(format!("{:x}", digest), "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+        assert_eq!(
+            format!("{:x}", digest),
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
 
-        assert!(validate_and_extract_hash_from_cas_path("sha256/b9/4e/b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9").is_err());
-        assert!(validate_and_extract_hash_from_cas_path("sha256/b9/4d/short").is_err());
-        assert!(validate_and_extract_hash_from_cas_path("md5/b9/4d/b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9").is_err());
+        assert!(matches!(
+            validate_and_extract_hash_from_cas_path(
+                "/sha256/b9/4d/b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+            ),
+            Err(ArtifactError::AbsolutePath)
+        ));
+        assert!(matches!(
+            validate_and_extract_hash_from_cas_path(
+                "sha256\\b9\\4d\\b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+            ),
+            Err(ArtifactError::InvalidSeparator)
+        ));
+        assert!(matches!(validate_and_extract_hash_from_cas_path("sha256/b9/4d/b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9/extra"), Err(ArtifactError::InvalidComponentCount(_))));
+        assert!(matches!(
+            validate_and_extract_hash_from_cas_path(
+                "sha256/../b9/4d/b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+            ),
+            Err(ArtifactError::PathTraversal)
+        ));
+        assert!(matches!(
+            validate_and_extract_hash_from_cas_path(
+                "sha256/b9/4e/b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+            ),
+            Err(ArtifactError::ShardMismatch)
+        ));
+        assert!(matches!(
+            validate_and_extract_hash_from_cas_path("sha256/b9/4d/short"),
+            Err(ArtifactError::Crypto(CryptoError::InvalidLength { .. }))
+        ));
+        assert!(matches!(
+            validate_and_extract_hash_from_cas_path(
+                "md5/b9/4d/b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+            ),
+            Err(ArtifactError::InvalidPrefix { .. })
+        ));
     }
 }

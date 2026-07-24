@@ -18,9 +18,8 @@ test:
 build:
     cargo build --workspace --locked
 
-# Check the workspace
-check:
-    cargo check --workspace
+# Check the workspace (format, lint, test)
+check: fmt lint test
 
 # Run cargo deny
 deny:

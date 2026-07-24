@@ -5,7 +5,9 @@ edition.workspace = true
 
 [dependencies]
 serde.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["v7", "serde"] }
 thiserror.workspace = true
+apparatus-time = { path = "../apparatus-time" }
+
 [dev-dependencies]
 serde_json.workspace = true

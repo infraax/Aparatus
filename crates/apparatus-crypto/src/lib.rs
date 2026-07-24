@@ -4,6 +4,7 @@
 
 use sha2::{Digest, Sha256};
 use std::fmt;
+use std::str::FromStr;
 
 /// An error that occurs during cryptographic operations.
 #[derive(Debug, thiserror::Error)]
@@ -17,8 +18,8 @@ pub enum CryptoError {
 }
 
 /// A 32-byte SHA-256 digest.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Sha256Digest([u8; 32]);
 
 impl Sha256Digest {
@@ -40,11 +41,18 @@ impl Sha256Digest {
                 actual: s.len(),
             });
         }
+
+        if !s
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
+            return Err(CryptoError::InvalidHex);
+        }
+
         let mut array = [0u8; 32];
         for i in 0..32 {
             let byte_str = &s[i * 2..i * 2 + 2];
-            array[i] = u8::from_str_radix(byte_str, 16)
-                .map_err(|_| CryptoError::InvalidHex)?;
+            array[i] = u8::from_str_radix(byte_str, 16).map_err(|_| CryptoError::InvalidHex)?;
         }
         Ok(Self(array))
     }
@@ -52,6 +60,14 @@ impl Sha256Digest {
     /// Return the raw byte array of the digest.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+}
+
+impl FromStr for Sha256Digest {
+    type Err = CryptoError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_hex(s)
     }
 }
 
@@ -82,24 +98,34 @@ mod tests {
 
     #[test]
     fn test_sha256_known_answer() {
-        // Echo -n "hello world" | sha256sum
         let data = b"hello world";
         let digest = Sha256Digest::compute(data);
         let hex = format!("{:x}", digest);
-        assert_eq!(hex, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+        assert_eq!(
+            hex,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
     }
 
     #[test]
     fn test_sha256_from_hex() {
         let hex = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
-        let digest = Sha256Digest::from_hex(hex).unwrap();
+        let digest = Sha256Digest::from_str(hex).unwrap();
         let formatted = format!("{:x}", digest);
         assert_eq!(hex, formatted);
     }
 
     #[test]
     fn test_sha256_invalid_hex() {
-        assert!(Sha256Digest::from_hex("invalid_length").is_err());
-        assert!(Sha256Digest::from_hex("z94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9").is_err());
+        assert!(Sha256Digest::from_str("invalid_length").is_err());
+        assert!(Sha256Digest::from_str(
+            "z94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        )
+        .is_err());
+        // Reject uppercase
+        assert!(Sha256Digest::from_str(
+            "B94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9"
+        )
+        .is_err());
     }
 }

@@ -9,3 +9,4 @@ apparatus-crypto = { path = "../apparatus-crypto", features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+apparatus-time = { path = "../apparatus-time" }

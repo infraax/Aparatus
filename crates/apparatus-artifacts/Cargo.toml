@@ -6,4 +6,5 @@ edition.workspace = true
 [dependencies]
 apparatus-types = { path = "../apparatus-types" }
 apparatus-crypto = { path = "../apparatus-crypto" }
+apparatus-store = { path = "../apparatus-store" }
 thiserror.workspace = true

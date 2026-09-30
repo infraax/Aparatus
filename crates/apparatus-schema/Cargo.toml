@@ -6,3 +6,4 @@ edition.workspace = true
 [dependencies]
 apparatus-types = { path = "../apparatus-types" }
 thiserror.workspace = true
+serde_json.workspace = true

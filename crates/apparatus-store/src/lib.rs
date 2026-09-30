@@ -19,6 +19,24 @@ pub enum StoreError {
     /// A generic backend error.
     #[error("Backend error: {0}")]
     Backend(String),
+    /// Content with the same digest is already stored (immutable, no overwrite).
+    #[error("Content {0} already exists")]
+    DigestAlreadyExists(String),
+    /// Append refused because the receipt does not extend the current head.
+    #[error("Chain mismatch: expected previous {expected}, got {actual}")]
+    ChainMismatch { expected: String, actual: String },
+    /// The requested receipt does not exist.
+    #[error("Receipt {0} not found")]
+    ReceiptNotFound(String),
+    /// Filesystem failure.
+    #[error("I/O error: {0}")]
+    Io(String),
+}
+
+impl From<std::io::Error> for StoreError {
+    fn from(e: std::io::Error) -> Self {
+        StoreError::Io(e.to_string())
+    }
 }
 
 /// A transactional boundary representing a single unit of atomic work.
@@ -32,7 +50,7 @@ pub trait Transaction {
 
 /// A read-only/append-only abstraction over the raw artifact store.
 ///
-/// Future concrete implementation will likely write directly to a local CAS filesystem.
+/// M1 implementation: `apparatus_artifacts::FsArtifactStore` (filesystem CAS).
 pub trait ArtifactStore {
     /// Store bytes under a specific ID. Must fail if the artifact already exists (immutable).
     fn store(&self, id: ArtifactId, data: &[u8]) -> Result<(), StoreError>;
@@ -43,7 +61,8 @@ pub trait ArtifactStore {
 
 /// A ledger storing cryptographic receipts for operations.
 ///
-/// Future concrete implementation will write to a SQLite table mapping receipts to operations.
+/// M1 implementation: `apparatus_ledger::FileLedger` (append-only JSONL + HEAD).
+/// `append` must fail when the receipt does not extend the current head.
 pub trait ReceiptLedger {
     /// Append a receipt to the ledger.
     fn append(&self, id: ReceiptId, receipt_bytes: &[u8]) -> Result<(), StoreError>;

@@ -4,6 +4,19 @@ version = "0.1.0"
 edition.workspace = true
 publish = false
 
+[[bin]]
+name = "apparatus"
+path = "src/main.rs"
+
 [dependencies]
+apparatus-types = { path = "../../crates/apparatus-types" }
+apparatus-time = { path = "../../crates/apparatus-time" }
+apparatus-crypto = { path = "../../crates/apparatus-crypto", features = ["serde"] }
+apparatus-schema = { path = "../../crates/apparatus-schema" }
+apparatus-store = { path = "../../crates/apparatus-store" }
+apparatus-artifacts = { path = "../../crates/apparatus-artifacts" }
+apparatus-ledger = { path = "../../crates/apparatus-ledger" }
 clap = { workspace = true, features = ["derive"] }
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

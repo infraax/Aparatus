@@ -40,6 +40,8 @@ cargo build --workspace --locked
 just build
 ```
 
+M1 runtime (RWS 2.0 kernel): see `M1.md`. Binary name: `apparatus`.
+
 To run the CLI diagnostics:
 ```bash
 cargo run -p apparatus-cli -- doctor
@@ -51,11 +53,11 @@ cargo run -p apparatus-cli -- doctor
   * `apparatus-types`: Core identity and data structure definitions (ObjectIds, ObjectHeader).
   * `apparatus-time`: Pluggable clock trait for deterministic testing.
   * `apparatus-crypto`: Narrow cryptographic operations for artifact identifiers (SHA-256).
-  * `apparatus-schema`: Validation traits and internal invariant checks for canonical data structures.
-  * `apparatus-store`: Persistence traits separating schema definitions from backend logic (to be backed by SQLite/CAS).
-  * `apparatus-artifacts`: CAS path generation and identifier routines.
-  * `apparatus-ledger`: Append-only chaining definitions and deterministic hashing.
-  * `apparatus-cli`: Core system interface.
+  * `apparatus-schema`: Validation traits; RWS 2.0 payload rules and the chain `State`.
+  * `apparatus-store`: Persistence traits and errors. M1 implementations: `FsArtifactStore` (artifacts), `FileLedger` (ledger).
+  * `apparatus-artifacts`: CAS path generation and the write-once filesystem store.
+  * `apparatus-ledger`: Receipts, canonical-JSON hashing, append-only JSONL chain with HEAD.
+  * `apparatus-cli`: `doctor` and the `rws` commands.
 
 * **Design Invariants**
   * Data is append-only and artifacts are immutable.

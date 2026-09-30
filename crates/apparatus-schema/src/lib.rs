@@ -6,6 +6,8 @@
 use apparatus_types::ObjectHeader;
 use thiserror::Error;
 
+pub mod rws;
+
 /// Errors that can occur during domain validation.
 #[derive(Debug, Error)]
 pub enum ValidationError {
@@ -18,6 +20,9 @@ pub enum ValidationError {
     /// Missing required internal invariants (e.g. absent provenance for non-public).
     #[error("Missing invariant: {0}")]
     MissingInvariant(String),
+    /// An RWS 2.0 rule was violated. `rule` is the rule id from RWS-2.0.md.
+    #[error("{rule}: {reason}")]
+    Rule { rule: &'static str, reason: String },
 }
 
 /// A trait for validating internal invariants of domain objects.
@@ -35,10 +40,12 @@ impl Validate for ObjectHeader {
             });
         }
 
-        if self.classification == apparatus_types::Classification::Restricted && self.provenance.is_none() {
-             return Err(ValidationError::MissingInvariant(
-                 "Restricted classification requires provenance".to_string()
-             ));
+        if self.classification == apparatus_types::Classification::Restricted
+            && self.provenance.is_none()
+        {
+            return Err(ValidationError::MissingInvariant(
+                "Restricted classification requires provenance".to_string(),
+            ));
         }
 
         if let Some(prov) = &self.provenance {

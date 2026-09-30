@@ -1,6 +1,6 @@
 # M3 — deferred
 
-Open after M3. See also `NOTES/M2-DEFERRED.md` (still valid).
+Open after M3. See also `docs/notes/M2-DEFERRED.md` (still valid).
 
 - MCP adapter: a thin client on the same JSONL RPC (M4 candidate). No MCP server in M3.
 - TCP bind (loopback or Tailscale address): Unix socket only. Remote clients reach the host first (SSH/Tailscale) and use the socket.

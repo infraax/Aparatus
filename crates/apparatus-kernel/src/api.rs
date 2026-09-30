@@ -221,6 +221,35 @@ pub enum Op {
         #[serde(default)]
         reason: Option<String>,
     },
+    /// Drop bytes into `in/new/` for the ingest pipe; they are ingested later,
+    /// one at a time, by the writer. `busy` when the queue is full.
+    IngestEnqueue {
+        /// Absolute path readable by the executing process.
+        #[serde(default)]
+        path: Option<String>,
+        /// Inline UTF-8 content.
+        #[serde(default)]
+        content: Option<String>,
+        /// File name in `in/new/` (default: the path's file name).
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        purpose: Option<String>,
+        #[serde(default)]
+        tag: Option<EvidenceTag>,
+        #[serde(default)]
+        classification: Option<String>,
+        #[serde(default)]
+        replica: bool,
+    },
+    /// Run the ingest pipe now until `in/new/` is empty.
+    IngestDrain,
+    /// Health snapshot (also rewrites `.apparatus/SIGNAL`).
+    Signals,
+    /// Consistent replica backup into an empty directory.
+    Backup {
+        to: String,
+    },
     /// Test hook: panics inside the handler when the executor allows it.
     DebugPanic,
 }
@@ -259,7 +288,12 @@ impl Op {
     pub fn is_read(&self) -> bool {
         matches!(
             self,
-            Op::Head | Op::Check | Op::Show { .. } | Op::List { .. } | Op::Tickets { .. }
+            Op::Head
+                | Op::Check
+                | Op::Show { .. }
+                | Op::List { .. }
+                | Op::Tickets { .. }
+                | Op::Signals
         )
     }
 }
@@ -355,6 +389,25 @@ pub struct ExecOptions {
     pub strict_principal: bool,
     /// Let `DebugPanic` actually panic (tests only).
     pub allow_debug_panic: bool,
+    /// Files `in/new/` may hold before `ingest_enqueue` answers `busy`
+    /// (default `pipe::DEFAULT_CAPACITY`).
+    pub ingest_capacity: Option<usize>,
+}
+
+impl ExecOptions {
+    pub fn capacity(&self) -> usize {
+        self.ingest_capacity
+            .unwrap_or(crate::pipe::DEFAULT_CAPACITY)
+            .max(1)
+    }
+
+    fn source(&self) -> &'static str {
+        if self.strict_principal {
+            "apparatusd"
+        } else {
+            "local"
+        }
+    }
 }
 
 /// Run one request. Never panics except for `DebugPanic` when allowed.
@@ -371,6 +424,9 @@ fn execute_inner(k: &mut Kernel, req: Request, opts: ExecOptions) -> Result<Resp
             panic!("debug_panic requested");
         }
         return Ok(Response::error("debug_panic is disabled"));
+    }
+    if let Op::Signals = req.op {
+        return Ok(crate::signal::response(k, opts.capacity(), opts.source()));
     }
     if req.op.is_read() {
         return read(k, &req.op);
@@ -395,8 +451,57 @@ fn execute_inner(k: &mut Kernel, req: Request, opts: ExecOptions) -> Result<Resp
             ));
         }
     }
+    let op = match req.op {
+        Op::IngestEnqueue {
+            path,
+            content,
+            name: file_name,
+            purpose,
+            tag,
+            classification,
+            replica,
+        } => {
+            let (bytes, file_name) = match (path, content) {
+                (Some(p), None) => {
+                    let fname = file_name.unwrap_or_else(|| {
+                        Path::new(&p)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    });
+                    (
+                        std::fs::read(&p).with_context(|| format!("reading {p}"))?,
+                        fname,
+                    )
+                }
+                (None, Some(c)) => (
+                    c.into_bytes(),
+                    file_name.ok_or_else(|| anyhow!("inline content needs a name"))?,
+                ),
+                _ => bail!("ingest_enqueue needs exactly one of path or content"),
+            };
+            let sidecar =
+                (purpose.is_some() || tag.is_some() || classification.is_some() || replica)
+                    .then_some(crate::pipe::Sidecar {
+                        purpose,
+                        tag,
+                        classification,
+                        replica,
+                    });
+            return crate::pipe::enqueue(k, &file_name, &bytes, sidecar, opts.capacity());
+        }
+        Op::IngestDrain => return Ok(Response::ok(crate::pipe::drain(k)?)),
+        Op::Backup { to } => {
+            let to = Path::new(&to);
+            let m = crate::backup::backup(k, to)?;
+            let mut r = Response::ok(crate::backup::manifest_lines(&m, to));
+            r.data = serde_json::to_value(&m).ok();
+            return Ok(r);
+        }
+        other => other,
+    };
     let signer = k.principal(Some(&name)).0;
-    let (mut extra, results) = write(k, signer, &name, req.role, req.producer_kind, req.op)?;
+    let (mut extra, results) = write(k, signer, &name, req.role, req.producer_kind, op)?;
     Ok(finish(&mut extra, results))
 }
 
@@ -434,7 +539,7 @@ fn parse_enum<T: serde::de::DeserializeOwned>(s: &str) -> Result<T> {
         .map_err(|_| anyhow!("invalid value '{s}'"))
 }
 
-fn classification(s: Option<&str>) -> Result<Classification> {
+pub(crate) fn classification(s: Option<&str>) -> Result<Classification> {
     match s.unwrap_or("internal") {
         "public" => Ok(Classification::Public),
         "internal" => Ok(Classification::Internal),
@@ -520,40 +625,16 @@ fn write(
                 _ => bail!("ingest needs exactly one of path or content"),
             };
             let classification = classification(class.as_deref())?;
-            let digest = Sha256Digest::compute(&bytes);
-            let role = k.pick_role(signer, role, &ANY_ROLE);
-            let artifact_id = ArtifactId::new();
-            let body = Body::Ingest(Ingest {
-                outcome: if classification == Classification::Restricted {
-                    IngestOutcome::AdmitRestricted
-                } else {
-                    IngestOutcome::Admit
-                },
-                purpose,
-                artifact_id: Some(artifact_id),
-                digest: format!("{digest:x}"),
-                size_bytes: bytes.len() as u64,
-                media_type: media_type(&locator).into(),
-                source_locator: locator,
-                evidence_tag: tag,
-                reason: None,
-                replica,
-            });
-            let solo = k.meta.solo;
-            let result = k.submit_as(
+            let (artifact_id, digest, result) = ingest_bytes(
+                k,
                 signer,
                 role,
-                None,
-                vec![],
-                solo,
+                bytes,
+                locator,
+                purpose,
+                tag,
                 classification,
-                body,
-                move |k| {
-                    k.cas
-                        .put(artifact_id, &bytes)
-                        .map(|_| ())
-                        .map_err(|e| anyhow!("CAS: {e}"))
-                },
+                replica,
             )?;
             Ok((
                 vec![format!("artifact {artifact_id} sha256 {digest:x}")],
@@ -1046,8 +1127,97 @@ fn write(
         | Op::Show { .. }
         | Op::List { .. }
         | Op::Tickets { .. }
+        | Op::IngestEnqueue { .. }
+        | Op::IngestDrain
+        | Op::Signals
+        | Op::Backup { .. }
         | Op::DebugPanic => bail!("not a write operation"),
     }
+}
+
+/// Admit bytes: check, write CAS, append the `ingest` receipt (C-03).
+///
+/// Bytes that sit in the CAS without any admitting receipt (a crash between
+/// the CAS write and the append) are set aside first, so a retry can admit
+/// them and nothing half-admitted stays in the store.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ingest_bytes(
+    k: &mut Kernel,
+    signer: PrincipalId,
+    role: Option<Role>,
+    bytes: Vec<u8>,
+    locator: String,
+    purpose: String,
+    tag: EvidenceTag,
+    classification: Classification,
+    replica: bool,
+) -> Result<(ArtifactId, Sha256Digest, Submit)> {
+    let digest = Sha256Digest::compute(&bytes);
+    let role = k.pick_role(signer, role, &ANY_ROLE);
+    let artifact_id = ArtifactId::new();
+    let body = Body::Ingest(Ingest {
+        outcome: if classification == Classification::Restricted {
+            IngestOutcome::AdmitRestricted
+        } else {
+            IngestOutcome::Admit
+        },
+        purpose,
+        artifact_id: Some(artifact_id),
+        digest: format!("{digest:x}"),
+        size_bytes: bytes.len() as u64,
+        media_type: media_type(&locator).into(),
+        source_locator: locator,
+        evidence_tag: tag,
+        reason: None,
+        replica,
+    });
+    let solo = k.meta.solo;
+    let result = k.submit_as(
+        signer,
+        role,
+        None,
+        vec![],
+        solo,
+        classification,
+        body,
+        move |k| {
+            // `check` passed, so no receipt admits this digest.
+            k.cas
+                .set_aside_orphan(&digest)
+                .map_err(|e| anyhow!("CAS: {e}"))?;
+            k.cas
+                .put(artifact_id, &bytes)
+                .map(|_| ())
+                .map_err(|e| anyhow!("CAS: {e}"))
+        },
+    )?;
+    Ok((artifact_id, digest, result))
+}
+
+/// Record a C-03 `reject`: a minimal ingest receipt, no bytes stored.
+pub(crate) fn ingest_reject(
+    k: &mut Kernel,
+    signer: PrincipalId,
+    bytes: &[u8],
+    locator: String,
+    purpose: String,
+    tag: EvidenceTag,
+    reason: String,
+) -> Result<Submit> {
+    let role = k.pick_role(signer, None, &ANY_ROLE);
+    let body = Body::Ingest(Ingest {
+        outcome: IngestOutcome::Reject,
+        purpose,
+        artifact_id: None,
+        digest: format!("{:x}", Sha256Digest::compute(bytes)),
+        size_bytes: bytes.len() as u64,
+        media_type: media_type(&locator).into(),
+        source_locator: locator,
+        evidence_tag: tag,
+        reason: Some(reason),
+        replica: false,
+    });
+    k.submit(signer, role, None, vec![], body)
 }
 
 fn empty_policy(sub_kind: PolicySubKind) -> Policy {

@@ -11,6 +11,7 @@ apparatus-schema = { path = "../apparatus-schema" }
 apparatus-store = { path = "../apparatus-store" }
 apparatus-artifacts = { path = "../apparatus-artifacts" }
 apparatus-ledger = { path = "../apparatus-ledger" }
+apparatus-hooks = { path = "../apparatus-hooks" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

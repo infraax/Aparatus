@@ -11,6 +11,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use apparatus_artifacts::FsArtifactStore;
 use apparatus_crypto::Sha256Digest;
+use apparatus_hooks::{Hook, NullHook};
 use apparatus_ledger::{ChainEntry, FileLedger, LedgerLock, Receipt, LOCK_TIMEOUT};
 use apparatus_schema::rws::{decode_payload, Rejection, State};
 use apparatus_time::{Clock, SystemClock};
@@ -22,6 +23,7 @@ use apparatus_types::{
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub const DAY_MS: u64 = 86_400_000;
 
@@ -68,6 +70,7 @@ pub struct Kernel {
     pub cas: FsArtifactStore,
     clock: SystemClock,
     root: PathBuf,
+    hook: Arc<dyn Hook>,
     _lock: LedgerLock,
 }
 
@@ -104,6 +107,7 @@ impl Kernel {
             cas: FsArtifactStore::new(dir.join("cas")),
             clock: SystemClock,
             root: root.to_path_buf(),
+            hook: Arc::new(NullHook),
             _lock: lock,
         })
     }
@@ -164,6 +168,15 @@ impl Kernel {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Install the process's one hook (default: `NullHook`).
+    pub fn set_hook(&mut self, hook: Arc<dyn Hook>) {
+        self.hook = hook;
+    }
+
+    pub fn hook(&self) -> &dyn Hook {
+        self.hook.as_ref()
     }
 
     /// Create `.apparatus/` with an empty chain.
@@ -525,6 +538,7 @@ impl Kernel {
         };
         let hash = self.ledger.append_receipt(&receipt)?;
         self.state.apply(&receipt.header, payload);
+        self.hook.after_receipt(&receipt);
         self.entries.push(ChainEntry { receipt, hash });
         Ok(hash)
     }
@@ -535,6 +549,11 @@ impl Kernel {
         attempted: &Payload,
         rejection: &Rejection,
     ) -> Result<Option<(ObjectId, Sha256Digest)>> {
+        let subject_text = attempted
+            .subject_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| attempted.body.kind().to_string());
+        self.hook.after_refuse(rejection.rule, &subject_text);
         if self.state.is_empty() {
             return Ok(None);
         }

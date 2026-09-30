@@ -11,7 +11,7 @@ One project = one append-only, hash-chained receipt ledger + a content-addressed
 | M1 | Kernel: typed payloads (11 kinds), canonical hash, file ledger + CAS, `apparatus rws` CLI | `docs/milestones/M1.md` |
 | M2 | Keep agreements (K-01), solo mandate_holder, correction/review, writer lock | `docs/milestones/M2.md` |
 | M3 | `apparatusd`: JSONL RPC on a Unix socket, one writer actor, tickets | `docs/milestones/M3.md` |
-| M4 | **Next** — ingest drop-pipeline, health signals, replica backup, hook trait | `docs/handoff/M4-HANDOFF.md` |
+| M4 | Ingest drop-pipeline, health signals + SIGNAL file, replica backup/restore, `Hook` trait | `docs/milestones/M4.md` |
 
 Open items per milestone: `docs/notes/M*-DEFERRED.md`.
 
@@ -25,6 +25,9 @@ apparatus rws ingest ./README.md --purpose corpus --tag C
 apparatus rws queue keep --asset demo
 apparatus rws check
 apparatusd --project .                    # optional: always-on daemon; the CLI then talks to it
+cp notes.md .apparatus/in/new/            # drop-pipeline (daemon), or `apparatus rws ingest-dir`
+apparatus rws signals                     # health; watchdogs read .apparatus/SIGNAL
+apparatus rws backup --to ../backup-1     # replica; `rws restore --from` into an empty project
 ```
 
 ## Develop
@@ -32,7 +35,7 @@ apparatusd --project .                    # optional: always-on daemon; the CLI 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                    # 54 tests at M3
+cargo test --workspace                    # 65 tests at M4
 just daemon .                             # restart loop around apparatusd
 ```
 
@@ -47,16 +50,17 @@ crates/
   apparatus-store       store traits and errors
   apparatus-artifacts   write-once filesystem CAS
   apparatus-ledger      receipts, canonical JSON, JSONL chain, writer lock
-  apparatus-kernel      single-writer kernel, Request/Response API, socket client
+  apparatus-hooks       `Hook` trait (empty conduits), `Signal`, NullHook/LogHook
+  apparatus-kernel      single-writer kernel, Request/Response API, socket client, ingest pipe, signals, backup
 bins/
   apparatus-cli         `apparatus` — daemon-first CLI (local mode under LOCK otherwise)
   apparatusd            always-on JSONL RPC daemon
 docs/
-  milestones/           M1–M3 how-to-run
+  milestones/           M1–M4 how-to-run
   notes/                deferred items per milestone
   handoff/              brief for the next session
   reports/              M0 reports
   background/           Design.md and Dutch Way (background only; RWS 2.0 overrules)
 ```
 
-Project data lives in `<project>/.apparatus/` (`project.json`, `ledger.jsonl`, `HEAD`, `cas/`, `LOCK`, `apparatusd.sock`).
+Project data lives in `<project>/.apparatus/` (`project.json`, `ledger.jsonl`, `HEAD`, `cas/`, `LOCK`, `apparatusd.sock`, `SIGNAL`, `in/`).

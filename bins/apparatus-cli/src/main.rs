@@ -262,6 +262,42 @@ enum Rws {
     Check,
     /// Import `rws/receipts.jsonl` (or another buffer) into an empty chain, once.
     ImportJsonl { path: PathBuf },
+    /// Run the ingest pipe now: recover `in/work/`, then empty `in/new/`.
+    IngestDir,
+    /// Drop a file into `in/new/` for the ingest pipe (ingested later, in order).
+    Enqueue {
+        path: PathBuf,
+        /// File name in `in/new/` (default: the file's own name).
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        purpose: Option<String>,
+        /// Evidence tag; without one the file is admitted as C and a ticket is filed.
+        #[arg(long, value_parser = parse_enum::<EvidenceTag>)]
+        tag: Option<EvidenceTag>,
+        #[arg(long, value_parser = parse_classification)]
+        classification: Option<Classification>,
+        #[arg(long)]
+        replica: bool,
+        #[command(flatten)]
+        signing: Signing,
+    },
+    /// Health snapshot: from the daemon, else computed locally.
+    Signals {
+        /// Only print `.apparatus/SIGNAL` as last written (no RPC, no lock).
+        #[arg(long)]
+        file: bool,
+    },
+    /// Consistent replica backup of chain, CAS and project.json into an empty DIR.
+    Backup {
+        #[arg(long)]
+        to: PathBuf,
+    },
+    /// Restore a backup into this project's empty `.apparatus/` (never over a live HEAD).
+    Restore {
+        #[arg(long)]
+        from: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -326,6 +362,14 @@ fn parse_classification(s: &str) -> Result<Classification, String> {
     }
 }
 
+fn class_name(c: Classification) -> &'static str {
+    match c {
+        Classification::Public => "public",
+        Classification::Internal => "internal",
+        Classification::Restricted => "restricted",
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli) {
@@ -368,6 +412,23 @@ fn rws(root: &Path, cmd: Rws) -> Result<ExitCode> {
             print_lines(Kernel::import_jsonl(root, &path, None, false)?);
             Ok(ExitCode::SUCCESS)
         }
+        Rws::Restore { from } => {
+            refuse_if_daemon(root)?;
+            print_lines(apparatus_kernel::backup::restore(&from, root)?);
+            Ok(ExitCode::SUCCESS)
+        }
+        Rws::Signals { file: true } => match apparatus_kernel::signal::read(root)? {
+            Some(s) => {
+                print_lines(apparatus_kernel::signal::lines(&s));
+                Ok(ExitCode::from(if s.is_ok() { 0 } else { 1 }))
+            }
+            None => {
+                eprintln!(
+                    "error: no .apparatus/SIGNAL yet (written by apparatusd or `rws signals`)"
+                );
+                Ok(ExitCode::from(1))
+            }
+        },
         other => {
             let req = to_request(other)?;
             Ok(ExitCode::from(dispatch(root, req)?))
@@ -400,7 +461,13 @@ fn dispatch(root: &Path, req: Request) -> Result<u8> {
             req.principal = Some(default_principal(root)?);
         }
         let mut client = apparatus_kernel::rpc::Client::new(stream)?;
-        return Ok(print_response(client.call(&req)?));
+        let mut resp = client.call(&req)?;
+        // A read is safe to repeat once. A busy write may still land: check `head`.
+        if resp.status == apparatus_kernel::Status::Busy && req.op.is_read() {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            resp = client.call(&req)?;
+        }
+        return Ok(print_response(resp));
     }
     let is_check = matches!(req.op, Op::Check);
     let mut kernel = match Kernel::open(root) {
@@ -494,14 +561,7 @@ fn to_request(cmd: Rws) -> Result<Request> {
                     name: None,
                     purpose,
                     tag,
-                    classification: Some(
-                        match classification {
-                            Classification::Public => "public",
-                            Classification::Internal => "internal",
-                            Classification::Restricted => "restricted",
-                        }
-                        .into(),
-                    ),
+                    classification: Some(class_name(classification).into()),
                     replica,
                 },
             )
@@ -734,6 +794,48 @@ fn to_request(cmd: Rws) -> Result<Request> {
                 },
             ),
         },
-        Rws::Init { .. } | Rws::ImportJsonl { .. } => unreachable!("handled in rws()"),
+        Rws::IngestDir => plain(None, Op::IngestDrain),
+        Rws::Enqueue {
+            path,
+            name,
+            purpose,
+            tag,
+            classification,
+            replica,
+            signing,
+        } => {
+            let abs = std::fs::canonicalize(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            req(
+                &signing,
+                Op::IngestEnqueue {
+                    path: Some(abs.display().to_string()),
+                    content: None,
+                    name,
+                    purpose,
+                    tag,
+                    classification: classification.map(|c| class_name(c).into()),
+                    replica,
+                },
+            )
+        }
+        Rws::Signals { .. } => plain(None, Op::Signals),
+        Rws::Backup { to } => {
+            // Absolute, so a daemon with another working directory writes the same place.
+            let to = if to.is_absolute() {
+                to
+            } else {
+                std::env::current_dir()?.join(to)
+            };
+            plain(
+                None,
+                Op::Backup {
+                    to: to.display().to_string(),
+                },
+            )
+        }
+        Rws::Init { .. } | Rws::ImportJsonl { .. } | Rws::Restore { .. } => {
+            unreachable!("handled in rws()")
+        }
     })
 }

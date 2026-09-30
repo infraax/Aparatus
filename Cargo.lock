@@ -73,6 +73,7 @@ name = "apparatus-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "apparatus-crypto",
  "apparatus-kernel",
  "apparatus-types",
  "clap",
@@ -90,12 +91,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "apparatus-hooks"
+version = "0.1.0"
+dependencies = [
+ "apparatus-ledger",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "apparatus-kernel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "apparatus-artifacts",
  "apparatus-crypto",
+ "apparatus-hooks",
  "apparatus-ledger",
  "apparatus-schema",
  "apparatus-store",

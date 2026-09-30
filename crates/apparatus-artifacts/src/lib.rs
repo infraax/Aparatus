@@ -108,6 +108,26 @@ impl FsArtifactStore {
         Sha256Digest::from_hex(hex.trim()).map_err(|e| StoreError::Backend(e.to_string()))
     }
 
+    /// Move an unrecorded blob for `digest` out of the store (to `orphans/`).
+    ///
+    /// Only for bytes no receipt admits: a crash between the CAS write and the
+    /// ledger append leaves such a blob, and `put` would refuse the retry. The
+    /// caller checks the chain first. Returns true when a blob was moved.
+    pub fn set_aside_orphan(&self, digest: &Sha256Digest) -> Result<bool, StoreError> {
+        let blob = self.blob_path(digest);
+        if !blob.exists() {
+            return Ok(false);
+        }
+        let dir = self.root.join("orphans");
+        fs::create_dir_all(&dir)?;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        fs::rename(&blob, dir.join(format!("{digest:x}.{nanos}")))?;
+        Ok(true)
+    }
+
     /// True when the blob for `digest` exists and its bytes hash to `digest`.
     pub fn verify(&self, digest: &Sha256Digest) -> Result<bool, StoreError> {
         let blob = self.blob_path(digest);
@@ -122,9 +142,20 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
+    // Write beside, then link into place: a crash never leaves a partial file
+    // under the final name, and an existing file is never replaced.
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp)?;
+    let written = file
+        .write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .and_then(|_| fs::hard_link(&tmp, path));
+    fs::remove_file(&tmp).ok();
+    written?;
     Ok(())
 }
 

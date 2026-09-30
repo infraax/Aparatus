@@ -1,4 +1,4 @@
-# M4 handoff — conduits (not started)
+# M4 handoff — conduits (done: see `docs/milestones/M4.md`)
 
 **State at handoff (2026-09-30):** `main` contains M1–M3 (PRs #2, #3 merged) plus this cleanup. 54 tests green, clippy/fmt/`--locked` clean.
 M4 was **not** implemented: the previous session ran out of budget. Start here.

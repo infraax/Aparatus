@@ -40,7 +40,7 @@ cargo build --workspace --locked
 just build
 ```
 
-M1 runtime (RWS 2.0 kernel): see `M1.md`. Binary name: `apparatus`.
+Runtime: `M1.md` (kernel, CLI `apparatus`), `M2.md` (agreements, lock), `M3.md` (daemon `apparatusd`).
 
 To run the CLI diagnostics:
 ```bash
@@ -57,7 +57,9 @@ cargo run -p apparatus-cli -- doctor
   * `apparatus-store`: Persistence traits and errors. M1 implementations: `FsArtifactStore` (artifacts), `FileLedger` (ledger).
   * `apparatus-artifacts`: CAS path generation and the write-once filesystem store.
   * `apparatus-ledger`: Receipts, canonical-JSON hashing, append-only JSONL chain with HEAD.
-  * `apparatus-cli`: `doctor` and the `rws` commands.
+  * `apparatus-kernel`: the single-writer RWS kernel, request/response API and socket client.
+  * `apparatus-cli`: `doctor` and the `rws` commands (daemon-first client).
+  * `apparatusd`: always-on JSONL RPC daemon around one writer actor.
 
 * **Design Invariants**
   * Data is append-only and artifacts are immutable.

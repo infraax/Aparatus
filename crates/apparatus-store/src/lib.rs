@@ -31,6 +31,9 @@ pub enum StoreError {
     /// Filesystem failure.
     #[error("I/O error: {0}")]
     Io(String),
+    /// Another writer holds the store lock.
+    #[error("Locked: {0}")]
+    Locked(String),
 }
 
 impl From<std::io::Error> for StoreError {

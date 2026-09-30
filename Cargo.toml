@@ -7,7 +7,9 @@ members = [
     "crates/apparatus-store",
     "crates/apparatus-artifacts",
     "crates/apparatus-ledger",
-    "bins/apparatus-cli"
+    "crates/apparatus-kernel",
+    "bins/apparatus-cli",
+    "bins/apparatusd"
 ]
 resolver = "2"
 
@@ -26,3 +28,4 @@ anyhow = "1.0"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 sha2 = "0.10"
 clap = { version = "4.5", features = ["derive"] }
+libc = "0.2"

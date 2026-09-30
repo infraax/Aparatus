@@ -73,12 +73,7 @@ name = "apparatus-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "apparatus-artifacts",
- "apparatus-crypto",
- "apparatus-ledger",
- "apparatus-schema",
- "apparatus-store",
- "apparatus-time",
+ "apparatus-kernel",
  "apparatus-types",
  "clap",
  "serde",
@@ -92,6 +87,22 @@ dependencies = [
  "serde",
  "sha2",
  "thiserror",
+]
+
+[[package]]
+name = "apparatus-kernel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "apparatus-artifacts",
+ "apparatus-crypto",
+ "apparatus-ledger",
+ "apparatus-schema",
+ "apparatus-store",
+ "apparatus-time",
+ "apparatus-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -138,6 +149,18 @@ dependencies = [
  "serde_json",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "apparatusd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "apparatus-kernel",
+ "apparatus-types",
+ "clap",
+ "libc",
+ "serde_json",
 ]
 
 [[package]]

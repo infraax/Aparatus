@@ -16,10 +16,24 @@ pub enum CryptoError {
     InvalidHex,
 }
 
-/// A 32-byte SHA-256 digest.
+/// A 32-byte SHA-256 digest. Serialises as a 64-character lowercase hex string.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Sha256Digest([u8; 32]);
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for Sha256Digest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&format!("{:x}", self))
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Sha256Digest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Sha256Digest::from_hex(&s).map_err(serde::de::Error::custom)
+    }
+}
 
 impl Sha256Digest {
     /// Compute the SHA-256 digest of the given bytes.
@@ -40,11 +54,14 @@ impl Sha256Digest {
                 actual: s.len(),
             });
         }
+        // Reject non-ASCII (slicing would panic), signs and uppercase before parsing.
+        if !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err(CryptoError::InvalidHex);
+        }
         let mut array = [0u8; 32];
         for i in 0..32 {
             let byte_str = &s[i * 2..i * 2 + 2];
-            array[i] = u8::from_str_radix(byte_str, 16)
-                .map_err(|_| CryptoError::InvalidHex)?;
+            array[i] = u8::from_str_radix(byte_str, 16).map_err(|_| CryptoError::InvalidHex)?;
         }
         Ok(Self(array))
     }
@@ -86,7 +103,10 @@ mod tests {
         let data = b"hello world";
         let digest = Sha256Digest::compute(data);
         let hex = format!("{:x}", digest);
-        assert_eq!(hex, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+        assert_eq!(
+            hex,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
     }
 
     #[test]
@@ -100,6 +120,9 @@ mod tests {
     #[test]
     fn test_sha256_invalid_hex() {
         assert!(Sha256Digest::from_hex("invalid_length").is_err());
-        assert!(Sha256Digest::from_hex("z94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9").is_err());
+        assert!(Sha256Digest::from_hex(
+            "z94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        )
+        .is_err());
     }
 }

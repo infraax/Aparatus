@@ -39,7 +39,8 @@ impl DeterministicClock {
 
     /// Advance the clock by the specified number of milliseconds.
     pub fn advance_ms(&self, ms: u64) {
-        self.current_ms.fetch_add(ms, std::sync::atomic::Ordering::SeqCst);
+        self.current_ms
+            .fetch_add(ms, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

@@ -4,10 +4,14 @@
 //! It does not perform persistence or handle network requests.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 use uuid::Uuid;
 
+pub mod rws;
+
 /// A generalized Object ID, currently implemented as UUIDv7.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ObjectId(Uuid);
 
 impl ObjectId {
@@ -17,10 +21,33 @@ impl ObjectId {
     }
 }
 
+impl fmt::Display for ObjectId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// Error returned when parsing an id from text fails.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid object id: {0}")]
+pub struct ParseIdError(String);
+
+impl FromStr for ObjectId {
+    type Err = ParseIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(s)
+            .map(Self)
+            .map_err(|_| ParseIdError(s.to_string()))
+    }
+}
+
 macro_rules! id_type {
     ($name:ident, $doc:expr) => {
         #[doc = $doc]
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+        )]
         pub struct $name(ObjectId);
 
         impl Default for $name {
@@ -40,14 +67,43 @@ macro_rules! id_type {
                 self.0
             }
         }
+
+        impl From<ObjectId> for $name {
+            fn from(id: ObjectId) -> Self {
+                Self(id)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt::Display::fmt(&self.0, f)
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = ParseIdError;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                ObjectId::from_str(s).map(Self)
+            }
+        }
     };
 }
 
 id_type!(ProjectId, "Unique identifier for a Project context.");
-id_type!(ArtifactId, "Unique identifier for an Artifact (often used to index a descriptor or object).");
+id_type!(
+    ArtifactId,
+    "Unique identifier for an Artifact (often used to index a descriptor or object)."
+);
 id_type!(ReceiptId, "Unique identifier for a Ledger Receipt.");
-id_type!(PrincipalId, "Unique identifier for a Principal (user or service identity).");
-id_type!(CorrelationId, "Unique identifier used to correlate causally related events.");
+id_type!(
+    PrincipalId,
+    "Unique identifier for a Principal (user or service identity)."
+);
+id_type!(
+    CorrelationId,
+    "Unique identifier used to correlate causally related events."
+);
 
 /// Classification of an object's sensitivity or rights context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

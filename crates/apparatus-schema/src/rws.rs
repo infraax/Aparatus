@@ -249,6 +249,17 @@ impl Validate for Payload {
                         return Err(rule("F-01", "failure event needs a next_decision"));
                     }
                 }
+                if let Some(t) = &e.ticket {
+                    if e.event != EventKind::ReportBack {
+                        return Err(rule(
+                            "A-07",
+                            "a ticket is carried only by a report_back event",
+                        ));
+                    }
+                    if t.title.trim().is_empty() || t.reporter.trim().is_empty() {
+                        return Err(rule("A-07", "a ticket needs a title and a reporter"));
+                    }
+                }
             }
             Body::Correction(c) => {
                 if c.reason.trim().is_empty() {
@@ -327,6 +338,7 @@ pub struct EventRecord {
     pub impact: Option<String>,
     pub next_decision: Option<NextDecision>,
     pub detail: Option<String>,
+    pub ticket: Option<Ticket>,
 }
 
 #[derive(Debug, Clone)]
@@ -459,6 +471,25 @@ impl State {
 
     pub fn events(&self) -> &[EventRecord] {
         &self.events
+    }
+
+    /// All tickets (report_back events carrying a ticket), oldest first.
+    pub fn tickets(&self) -> Vec<&EventRecord> {
+        self.events.iter().filter(|e| e.ticket.is_some()).collect()
+    }
+
+    /// Tickets without a later `report_back_resolved` event on them.
+    pub fn open_tickets(&self) -> Vec<&EventRecord> {
+        let resolved: BTreeSet<ObjectId> = self
+            .events
+            .iter()
+            .filter(|e| e.event == EventKind::ReportBackResolved)
+            .flat_map(|e| e.subject)
+            .collect();
+        self.tickets()
+            .into_iter()
+            .filter(|t| !resolved.contains(&t.id))
+            .collect()
     }
 
     /// Active keep agreements: id → asset scope.
@@ -1190,6 +1221,17 @@ impl State {
                 ));
             }
         }
+        if e.event == EventKind::ReportBackResolved {
+            if let Some(subject) = payload.subject_id {
+                let is_ticket = self
+                    .events
+                    .iter()
+                    .any(|r| r.id == subject && r.ticket.is_some());
+                if is_ticket && !self.open_tickets().iter().any(|t| t.id == subject) {
+                    return Err(Rejection::new("A-07", "ticket is already resolved"));
+                }
+            }
+        }
         self.check_refs(&e.refs, "F-01")
     }
 
@@ -1420,6 +1462,7 @@ impl State {
                     impact: e.impact.clone(),
                     next_decision: e.next_decision.clone(),
                     detail: e.detail.clone(),
+                    ticket: e.ticket.clone(),
                 });
             }
             Body::Correction(_) | Body::Review(_) => {}
@@ -1577,6 +1620,7 @@ mod tests {
                     }),
                     refs: vec![],
                     detail: None,
+                    ticket: None,
                 }),
             )
         }
@@ -2134,6 +2178,7 @@ mod tests {
                 next_decision: None,
                 refs: vec![],
                 detail: None,
+                ticket: None,
             }),
         );
         assert_eq!(r.unwrap_err().rule, "F-01");
@@ -2152,6 +2197,7 @@ mod tests {
                 }),
                 refs: vec![],
                 detail: None,
+                ticket: None,
             }),
         );
         assert_eq!(h.state.open_failures().len(), 1);
@@ -2297,5 +2343,60 @@ mod tests {
         assert_eq!(r.unwrap_err().rule, "V-01");
         let item = h.keep_item();
         h.ok(h.owner, Role::Execution, Some(item), vec![], review);
+    }
+
+    #[test]
+    fn tickets_open_and_resolve_once() {
+        let mut h = Harness::solo();
+        let item = h.keep_item();
+        let ticket = |event, t: Option<Ticket>| {
+            Body::Event(Event {
+                event,
+                impact: None,
+                next_decision: None,
+                refs: vec![],
+                detail: None,
+                ticket: t,
+            })
+        };
+        let t = Ticket {
+            title: "pump does not start".into(),
+            body: None,
+            reporter: "qwen".into(),
+        };
+        // A ticket only rides on report_back.
+        let r = h.try_(
+            h.owner,
+            Role::Execution,
+            Some(item),
+            vec![],
+            ticket(EventKind::ConditionReported, Some(t.clone())),
+        );
+        assert_eq!(r.unwrap_err().rule, "A-07");
+        let id = h.ok(
+            h.owner,
+            Role::Execution,
+            Some(item),
+            vec![],
+            ticket(EventKind::ReportBack, Some(t)),
+        );
+        assert_eq!(h.state.open_tickets().len(), 1);
+        h.ok(
+            h.owner,
+            Role::Execution,
+            Some(id),
+            vec![],
+            ticket(EventKind::ReportBackResolved, None),
+        );
+        assert!(h.state.open_tickets().is_empty());
+        assert_eq!(h.state.tickets().len(), 1);
+        let again = h.try_(
+            h.owner,
+            Role::Execution,
+            Some(id),
+            vec![],
+            ticket(EventKind::ReportBackResolved, None),
+        );
+        assert_eq!(again.unwrap_err().rule, "A-07");
     }
 }

@@ -67,6 +67,7 @@ pub struct Kernel {
     ledger: FileLedger,
     pub cas: FsArtifactStore,
     clock: SystemClock,
+    root: PathBuf,
     _lock: LedgerLock,
 }
 
@@ -94,6 +95,22 @@ impl Kernel {
 
     fn open_locked(root: &Path, lock: LedgerLock) -> Result<Self> {
         let dir = apparatus_dir(root);
+        let (meta, entries, state) = Self::load(root)?;
+        Ok(Self {
+            meta,
+            state,
+            entries,
+            ledger: FileLedger::new(&dir),
+            cas: FsArtifactStore::new(dir.join("cas")),
+            clock: SystemClock,
+            root: root.to_path_buf(),
+            _lock: lock,
+        })
+    }
+
+    /// Read project.json, verify the chain on disk and replay it. No locking.
+    fn load(root: &Path) -> Result<(ProjectMeta, Vec<ChainEntry>, State)> {
+        let dir = apparatus_dir(root);
         let meta_path = dir.join("project.json");
         if !meta_path.exists() {
             bail!(
@@ -103,8 +120,7 @@ impl Kernel {
         }
         let meta: ProjectMeta = serde_json::from_slice(&fs::read(&meta_path)?)
             .context("reading .apparatus/project.json")?;
-        let ledger = FileLedger::new(&dir);
-        let entries = ledger
+        let entries = FileLedger::new(&dir)
             .verify_chain()
             .map_err(|e| anyhow!("integrity: {e}"))?;
         let mut state = State::new();
@@ -121,15 +137,33 @@ impl Kernel {
                 .admit(&entry.receipt.header, &payload)
                 .map_err(|r| anyhow!("integrity: line {} replays as illegal: {r}", i + 1))?;
         }
-        Ok(Self {
-            meta,
-            state,
-            entries,
-            ledger,
-            cas: FsArtifactStore::new(dir.join("cas")),
-            clock: SystemClock,
-            _lock: lock,
-        })
+        Ok((meta, entries, state))
+    }
+
+    /// Re-read the chain from disk, keeping the lock (used after a handler panic).
+    pub fn reload(&mut self) -> Result<()> {
+        let (meta, entries, state) = Self::load(&self.root)?;
+        self.meta = meta;
+        self.entries = entries;
+        self.state = state;
+        Ok(())
+    }
+
+    /// Verify the on-disk chain and that it is exactly what this kernel holds.
+    pub fn verify_disk(&self) -> Result<()> {
+        let disk = self
+            .ledger
+            .verify_chain()
+            .map_err(|e| anyhow!("integrity: {e}"))?;
+        let disk_head = disk.last().map(|e| (e.receipt.receipt_id(), e.hash));
+        if disk.len() != self.entries.len() || disk_head != self.head() {
+            bail!("integrity: on-disk chain differs from the loaded chain");
+        }
+        Ok(())
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Create `.apparatus/` with an empty chain.
@@ -519,6 +553,7 @@ impl Kernel {
                 "rule {}; attempted {attempted_json}",
                 rejection.rule
             )),
+            ticket: None,
         });
         let id = ObjectId::new_v7();
         let header = self.header(id, attempted.signer, Classification::Internal);

@@ -495,6 +495,20 @@ pub struct Event {
     pub refs: Vec<ObjectId>,
     /// Free-text detail, e.g. the rule id and attempted payload of a refusal.
     pub detail: Option<String>,
+    /// Present on a ticket: a `report_back` event anyone bound may file (M3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<Ticket>,
+}
+
+/// A ticket: a defect or "this does not work" report. Carried by a
+/// `report_back` event; closed by a `report_back_resolved` event whose subject
+/// is the ticket's receipt id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ticket {
+    pub title: String,
+    pub body: Option<String>,
+    /// Principal name of whoever filed it.
+    pub reporter: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -585,6 +599,7 @@ mod tests {
             next_decision: None,
             refs: vec![],
             detail: None,
+            ticket: None,
         })))
         .unwrap();
         assert_eq!(v["event"], "target_dropped");

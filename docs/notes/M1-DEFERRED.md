@@ -1,6 +1,6 @@
 # M1 — deferred
 
-> Status after M2: items marked **[M2 done]** are closed; everything still open moved to `NOTES/M2-DEFERRED.md`.
+> Status after M2: items marked **[M2 done]** are closed; everything still open moved to `docs/notes/M2-DEFERRED.md`.
 
 Things M1 needed or touched but deliberately did not build. Each line names the RWS 2.0 rule.
 

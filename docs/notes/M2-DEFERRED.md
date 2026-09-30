@@ -1,6 +1,6 @@
 # M2 — deferred
 
-Open after M2. Carried over from `NOTES/M1-DEFERRED.md` unless marked *new*. Each line names the RWS 2.0 rule.
+Open after M2. Carried over from `docs/notes/M1-DEFERRED.md` unless marked *new*. Each line names the RWS 2.0 rule.
 
 ## Validation not yet enforced
 

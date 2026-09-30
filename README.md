@@ -1,67 +1,62 @@
 # Apparatus
 
-Apparatus is a local-first, owner-operated system preserving canonical, append-only history.
+Local-first, owner-operated runtime for **RWS 2.0** (policy: `infraax/delta`, `RWS-2.0.md` + `RWS-2.0-MAPPING.md`).
+One project = one append-only, hash-chained receipt ledger + a content-addressed artefact store, written by exactly one writer.
 
-This repository contains the M0 (Foundational) implementation for the system, laying out the immutable object, cryptographic hashing, and local ledger architecture schemas.
+## Status
 
-## Development
+| Milestone | What | Doc |
+|---|---|---|
+| M0 | Workspace scaffold, types, hashing | `docs/reports/` |
+| M1 | Kernel: typed payloads (11 kinds), canonical hash, file ledger + CAS, `apparatus rws` CLI | `docs/milestones/M1.md` |
+| M2 | Keep agreements (K-01), solo mandate_holder, correction/review, writer lock | `docs/milestones/M2.md` |
+| M3 | `apparatusd`: JSONL RPC on a Unix socket, one writer actor, tickets | `docs/milestones/M3.md` |
+| M4 | **Next** — ingest drop-pipeline, health signals, replica backup, hook trait | `docs/handoff/M4-HANDOFF.md` |
 
-Prerequisites:
-- `rustup` configured for the stable Rust channel
-- `just` task runner (optional but recommended)
+Open items per milestone: `docs/notes/M*-DEFERRED.md`.
 
-### Workflows
+## Quick start
 
-To format code:
 ```bash
-cargo fmt --all
-# or
-just fmt-fix
+cargo build --workspace --locked          # binaries: target/debug/apparatus, target/debug/apparatusd
+apparatus rws init --solo                 # in a project directory
+apparatus rws policy agreement --asset '*'
+apparatus rws ingest ./README.md --purpose corpus --tag C
+apparatus rws queue keep --asset demo
+apparatus rws check
+apparatusd --project .                    # optional: always-on daemon; the CLI then talks to it
 ```
 
-To run lint checks:
+## Develop
+
 ```bash
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-# or
-just lint
+cargo test --workspace                    # 54 tests at M3
+just daemon .                             # restart loop around apparatusd
 ```
 
-To run all unit and integration tests:
-```bash
-cargo test --workspace
-# or
-just test
+## Layout
+
+```text
+crates/
+  apparatus-types       ids, headers, RWS 2.0 vocabulary and payloads
+  apparatus-time        clocks
+  apparatus-crypto      SHA-256 digests
+  apparatus-schema      payload validation + chain State (all RWS rules)
+  apparatus-store       store traits and errors
+  apparatus-artifacts   write-once filesystem CAS
+  apparatus-ledger      receipts, canonical JSON, JSONL chain, writer lock
+  apparatus-kernel      single-writer kernel, Request/Response API, socket client
+bins/
+  apparatus-cli         `apparatus` — daemon-first CLI (local mode under LOCK otherwise)
+  apparatusd            always-on JSONL RPC daemon
+docs/
+  milestones/           M1–M3 how-to-run
+  notes/                deferred items per milestone
+  handoff/              brief for the next session
+  reports/              M0 reports
+  background/           Design.md and Dutch Way (background only; RWS 2.0 overrules)
 ```
 
-To build the workspace:
-```bash
-cargo build --workspace --locked
-# or
-just build
-```
-
-Runtime: `M1.md` (kernel, CLI `apparatus`), `M2.md` (agreements, lock), `M3.md` (daemon `apparatusd`).
-
-To run the CLI diagnostics:
-```bash
-cargo run -p apparatus-cli -- doctor
-```
-
-## Architecture Notes
-
-* **Crates**
-  * `apparatus-types`: Core identity and data structure definitions (ObjectIds, ObjectHeader).
-  * `apparatus-time`: Pluggable clock trait for deterministic testing.
-  * `apparatus-crypto`: Narrow cryptographic operations for artifact identifiers (SHA-256).
-  * `apparatus-schema`: Validation traits; RWS 2.0 payload rules and the chain `State`.
-  * `apparatus-store`: Persistence traits and errors. M1 implementations: `FsArtifactStore` (artifacts), `FileLedger` (ledger).
-  * `apparatus-artifacts`: CAS path generation and the write-once filesystem store.
-  * `apparatus-ledger`: Receipts, canonical-JSON hashing, append-only JSONL chain with HEAD.
-  * `apparatus-kernel`: the single-writer RWS kernel, request/response API and socket client.
-  * `apparatus-cli`: `doctor` and the `rws` commands (daemon-first client).
-  * `apparatusd`: always-on JSONL RPC daemon around one writer actor.
-
-* **Design Invariants**
-  * Data is append-only and artifacts are immutable.
-  * SQLite is the intended backing datastore.
-  * Dependency trees are strictly controlled and phase-gated.
+Project data lives in `<project>/.apparatus/` (`project.json`, `ledger.jsonl`, `HEAD`, `cas/`, `LOCK`, `apparatusd.sock`).

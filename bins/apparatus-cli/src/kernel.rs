@@ -3,11 +3,15 @@
 //! Every write goes: build payload → `State::check` → side effect (CAS) →
 //! `FileLedger::append_receipt` → `State::apply`. A refused write is recorded
 //! as an `illegal_transition_rejected` event on the same chain.
+//!
+//! A `Kernel` holds the exclusive `.apparatus/LOCK` from before it reads the
+//! chain until it is dropped, so two CLI processes never append against the
+//! same HEAD.
 
 use anyhow::{anyhow, bail, Context, Result};
 use apparatus_artifacts::FsArtifactStore;
 use apparatus_crypto::Sha256Digest;
-use apparatus_ledger::{ChainEntry, FileLedger, Receipt};
+use apparatus_ledger::{ChainEntry, FileLedger, LedgerLock, Receipt, LOCK_TIMEOUT};
 use apparatus_schema::rws::{decode_payload, Rejection, State};
 use apparatus_time::{Clock, SystemClock};
 use apparatus_types::rws::*;
@@ -47,6 +51,15 @@ pub enum Submit {
     Refused(Refused),
 }
 
+/// One receipt of a `submit_batch`.
+pub struct BatchPart {
+    pub signer: PrincipalId,
+    pub role: Role,
+    pub subject: Option<ObjectId>,
+    pub evidence: Vec<ArtifactId>,
+    pub body: Body,
+}
+
 pub struct Kernel {
     pub meta: ProjectMeta,
     pub state: State,
@@ -54,6 +67,7 @@ pub struct Kernel {
     ledger: FileLedger,
     pub cas: FsArtifactStore,
     clock: SystemClock,
+    _lock: LedgerLock,
 }
 
 pub fn apparatus_dir(root: &Path) -> PathBuf {
@@ -65,8 +79,20 @@ pub fn buffer_path(root: &Path) -> PathBuf {
 }
 
 impl Kernel {
+    /// Take the writer lock for `root`.
+    fn lock(root: &Path) -> Result<LedgerLock> {
+        FileLedger::new(apparatus_dir(root))
+            .lock(LOCK_TIMEOUT)
+            .map_err(|e| anyhow!("another apparatus process is writing this project: {e}"))
+    }
+
     /// Open an initialised project, verifying the chain and replaying every receipt.
     pub fn open(root: &Path) -> Result<Self> {
+        let lock = Self::lock(root)?;
+        Self::open_locked(root, lock)
+    }
+
+    fn open_locked(root: &Path, lock: LedgerLock) -> Result<Self> {
         let dir = apparatus_dir(root);
         let meta_path = dir.join("project.json");
         if !meta_path.exists() {
@@ -102,18 +128,20 @@ impl Kernel {
             ledger,
             cas: FsArtifactStore::new(dir.join("cas")),
             clock: SystemClock,
+            _lock: lock,
         })
     }
 
     /// Create `.apparatus/` with an empty chain.
     fn create(root: &Path, meta: ProjectMeta) -> Result<Self> {
         let dir = apparatus_dir(root);
+        let lock = Self::lock(root)?;
         if dir.join("project.json").exists() {
             bail!("{} is already initialised", root.display());
         }
         fs::create_dir_all(dir.join("cas"))?;
         fs::write(dir.join("project.json"), serde_json::to_vec_pretty(&meta)?)?;
-        Self::open(root)
+        Self::open_locked(root, lock)
     }
 
     /// `rws init`: bootstrap, or import an existing `rws/receipts.jsonl` buffer once.
@@ -145,7 +173,8 @@ impl Kernel {
         let owner = PrincipalId::new();
         let mut roles = vec![Role::Continuity];
         if solo {
-            roles.extend([Role::Policy, Role::Execution]);
+            // Solo also holds the handover mandate so G4 needs no extra bind (M2).
+            roles.extend([Role::Policy, Role::Execution, Role::MandateHolder]);
         }
         let mut out = Vec::new();
         for role in roles {
@@ -376,6 +405,52 @@ impl Kernel {
             body,
         };
         self.submit_payload(header, payload, effect)
+    }
+
+    /// Submit several receipts as one unit: each is checked against the state
+    /// as it would be after the previous ones. All are appended, or none is and
+    /// the first refusal is recorded. The writer lock is held throughout.
+    pub fn submit_batch(&mut self, parts: Vec<BatchPart>) -> Result<Vec<Submit>> {
+        let self_certified = self.meta.solo;
+        let prepared: Vec<(ObjectHeader, Payload)> = parts
+            .into_iter()
+            .map(|part| {
+                let header = self.header(ObjectId::new_v7(), part.signer, Classification::Internal);
+                let payload = Payload {
+                    rws: RWS_VERSION.into(),
+                    subject_id: part.subject,
+                    signer: part.signer,
+                    role: part.role,
+                    authority_ref: None,
+                    evidence: part.evidence,
+                    self_certified,
+                    body: part.body,
+                };
+                (header, payload)
+            })
+            .collect();
+        let mut dry = self.state.clone();
+        for (header, payload) in &prepared {
+            if let Err(rejection) = dry.check(header, payload) {
+                let recorded = self.record_refusal(payload, &rejection)?;
+                return Ok(vec![Submit::Refused(Refused {
+                    rejection,
+                    recorded,
+                })]);
+            }
+            dry.apply(header, payload);
+        }
+        let mut out = Vec::new();
+        for (header, payload) in prepared {
+            let id = header.id;
+            let hash = self.append(header, &payload)?;
+            out.push(Submit::Accepted {
+                id,
+                kind: payload.body.kind(),
+                hash,
+            });
+        }
+        Ok(out)
     }
 
     pub fn submit_payload(

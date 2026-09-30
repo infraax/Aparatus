@@ -220,8 +220,13 @@ impl Validate for Payload {
                         }
                     }
                     PolicySubKind::Agreement => {
-                        if p.asset_scope.is_empty() {
-                            return Err(rule("K-01", "agreement needs an asset_scope"));
+                        if p.asset_scope.is_empty()
+                            || p.asset_scope.iter().any(|a| a.trim().is_empty())
+                        {
+                            return Err(rule(
+                                "K-01",
+                                "agreement needs a non-empty asset_scope (names or \"*\")",
+                            ));
                         }
                     }
                     PolicySubKind::Rule => {
@@ -288,6 +293,8 @@ pub struct WorkItem {
     pub asset_ref: String,
     pub lead: Option<PrincipalId>,
     pub adds_function: bool,
+    /// Chain position of the item's latest transition.
+    pub last_seq: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -344,6 +351,25 @@ pub struct State {
     gates: BTreeMap<ObjectId, GateRecord>,
     events: Vec<EventRecord>,
     start_funding_share_bp: Option<u32>,
+    /// Chain position of the next receipt to be folded.
+    seq: usize,
+    /// Active (not superseded) keep agreements and their asset scope (K-01).
+    agreements: BTreeMap<ObjectId, Vec<String>>,
+    /// Role under which each object was created or last signed (C-06).
+    origin_role: BTreeMap<ObjectId, Role>,
+    /// Chain position of the latest displacement event per subject (K-09).
+    last_displacement: BTreeMap<ObjectId, usize>,
+}
+
+/// Rank used for corrections: a corrector must rank at least as high as the
+/// role that signed the corrected object (RWS-2.0-MAPPING §2, `correction`).
+pub fn role_rank(role: Role) -> u8 {
+    match role {
+        Role::Continuity => 4,
+        Role::Policy | Role::MandateHolder => 3,
+        Role::Execution => 2,
+        Role::Adviser | Role::Coordinator => 1,
+    }
 }
 
 impl State {
@@ -433,6 +459,23 @@ impl State {
 
     pub fn events(&self) -> &[EventRecord] {
         &self.events
+    }
+
+    /// Active keep agreements: id → asset scope.
+    pub fn agreements(&self) -> &BTreeMap<ObjectId, Vec<String>> {
+        &self.agreements
+    }
+
+    /// True when an active agreement covers `asset` by name or by `*` (K-01).
+    pub fn agreement_covers(&self, asset: &str) -> bool {
+        self.agreements
+            .values()
+            .any(|scope| scope.iter().any(|a| a == "*" || a == asset))
+    }
+
+    /// Role under which the object was created or signed.
+    pub fn origin_role(&self, id: ObjectId) -> Option<Role> {
+        self.origin_role.get(&id).copied()
     }
 
     /// Failure events not referenced by any later event (open for decision).
@@ -544,8 +587,8 @@ impl State {
             Body::Advice(a) => self.check_refs(&a.inputs, "A-05"),
             Body::Policy(p) => self.check_policy(payload, p),
             Body::Event(e) => self.check_event(payload, e),
-            Body::Correction(c) => self.check_correction(c),
-            Body::Review(r) => self.check_review(r),
+            Body::Correction(c) => self.check_correction(payload, c),
+            Body::Review(r) => self.check_review(payload, r),
         }
     }
 
@@ -675,6 +718,12 @@ impl State {
             if payload.role != Role::Execution {
                 return Err(Rejection::new("K-06", "execution queues keep work"));
             }
+            if !self.agreement_covers(&q.asset_ref) {
+                return Err(Rejection::new(
+                    "K-01",
+                    format!("no active keep agreement covers asset {}", q.asset_ref),
+                ));
+            }
             return Ok(());
         };
         let item = self
@@ -721,6 +770,17 @@ impl State {
             return Err(Rejection::new(
                 "K-07",
                 "item adds function; reclassify it to build",
+            ));
+        }
+        if q.to == Deferred
+            && self
+                .last_displacement
+                .get(&id)
+                .is_none_or(|seq| *seq <= item.last_seq)
+        {
+            return Err(Rejection::new(
+                "K-09",
+                "deferring needs a displacement event on this item after its last transition",
             ));
         }
         if q.to == Closed && payload.evidence.is_empty() {
@@ -1133,9 +1193,20 @@ impl State {
         self.check_refs(&e.refs, "F-01")
     }
 
-    fn check_correction(&self, c: &Correction) -> Result<(), Rejection> {
+    fn check_correction(&self, payload: &Payload, c: &Correction) -> Result<(), Rejection> {
         if !self.exists(c.corrects) {
             return Err(Rejection::new("C-06", "corrected object does not exist"));
+        }
+        if let Some(origin) = self.origin_role.get(&c.corrects) {
+            if role_rank(payload.role) < role_rank(*origin) {
+                return Err(Rejection::new(
+                    "C-06",
+                    format!(
+                        "{} cannot correct an object signed as {origin}",
+                        payload.role
+                    ),
+                ));
+            }
         }
         if let Some(r) = c.replacement {
             if !self.exists(r) {
@@ -1145,7 +1216,15 @@ impl State {
         Ok(())
     }
 
-    fn check_review(&self, r: &Review) -> Result<(), Rejection> {
+    fn check_review(&self, payload: &Payload, r: &Review) -> Result<(), Rejection> {
+        if let Some(subject) = payload.subject_id {
+            if !self.exists(subject) {
+                return Err(Rejection::new(
+                    "V-01",
+                    format!("review subject {subject} does not exist"),
+                ));
+            }
+        }
         if let Some(t) = &r.trigger {
             if !self.exists(t.trigger_ref) {
                 return Err(Rejection::new("V-04", "trigger ref does not exist"));
@@ -1169,6 +1248,9 @@ impl State {
             self.project_id = Some(header.project_id);
         }
         self.receipts.insert(id, payload.body.kind());
+        let seq = self.seq;
+        self.seq += 1;
+        self.origin_role.insert(id, payload.role);
         match &payload.body {
             Body::Ingest(i) => {
                 if matches!(
@@ -1176,6 +1258,7 @@ impl State {
                     IngestOutcome::Admit | IngestOutcome::AdmitRestricted
                 ) {
                     if let Some(aid) = i.artifact_id {
+                        self.origin_role.insert(aid.inner(), payload.role);
                         self.artifacts.insert(
                             aid.inner(),
                             ArtifactInfo {
@@ -1219,6 +1302,7 @@ impl State {
                             asset_ref: q.asset_ref.clone(),
                             lead: q.lead.or(Some(payload.signer)),
                             adds_function: q.adds_function,
+                            last_seq: seq,
                         },
                     );
                 }
@@ -1226,6 +1310,7 @@ impl State {
                     if let Some(w) = self.items.get_mut(&item) {
                         w.state = ItemState::Keep(q.to);
                         w.adds_function |= q.adds_function;
+                        w.last_seq = seq;
                     }
                 }
             },
@@ -1238,6 +1323,7 @@ impl State {
                         asset_ref: q.asset_ref.clone(),
                         lead: q.lead.or(Some(payload.signer)),
                         adds_function: true,
+                        last_seq: seq,
                     },
                 );
             }
@@ -1261,8 +1347,11 @@ impl State {
                     (GateKind::Handover, GateOutcome::Go) => Some(BuildState::HandedOver),
                     _ => None,
                 };
-                if let (Some(next), Some(w)) = (next, self.items.get_mut(&item)) {
-                    w.state = ItemState::Build(next);
+                if let Some(w) = self.items.get_mut(&item) {
+                    if let Some(next) = next {
+                        w.state = ItemState::Build(next);
+                    }
+                    w.last_seq = seq;
                 }
             }
             Body::Means(m) => {
@@ -1299,7 +1388,14 @@ impl State {
             }
             Body::Policy(p) => {
                 self.policies.insert(id, p.sub_kind);
+                if let Some(old) = p.supersedes {
+                    self.agreements.remove(&old);
+                }
+                if p.sub_kind == PolicySubKind::Agreement {
+                    self.agreements.insert(id, p.asset_scope.clone());
+                }
                 if let Some(e) = &p.envelope {
+                    self.origin_role.insert(e.id, payload.role);
                     self.envelopes.insert(
                         e.id,
                         EnvelopeState {
@@ -1314,6 +1410,9 @@ impl State {
                 }
             }
             Body::Event(e) => {
+                if let (EventKind::Displacement, Some(subject)) = (e.event, payload.subject_id) {
+                    self.last_displacement.insert(subject, seq);
+                }
                 self.events.push(EventRecord {
                     id,
                     event: e.event,
@@ -1363,7 +1462,123 @@ mod tests {
                     bind(role, h.owner, "owner", PrincipalKind::Human),
                 );
             }
+            h.agreement(&["*"]);
             h
+        }
+
+        /// Solo roles but no keep agreement yet.
+        fn solo_without_agreement() -> Self {
+            let mut h = Harness {
+                state: State::new(),
+                project: ProjectId::new(),
+                clock: 1_000,
+                owner: PrincipalId::new(),
+            };
+            for role in [Role::Continuity, Role::Policy, Role::Execution] {
+                h.ok(
+                    h.owner,
+                    Role::Continuity,
+                    None,
+                    vec![],
+                    bind(role, h.owner, "owner", PrincipalKind::Human),
+                );
+            }
+            h
+        }
+
+        fn agreement(&mut self, assets: &[&str]) -> ObjectId {
+            self.agreement_superseding(assets, None)
+        }
+
+        fn agreement_superseding(
+            &mut self,
+            assets: &[&str],
+            supersedes: Option<ObjectId>,
+        ) -> ObjectId {
+            let signers = [Role::Continuity, Role::Policy, Role::Execution]
+                .into_iter()
+                .map(|role| Signer {
+                    principal: self.owner,
+                    role,
+                })
+                .collect();
+            self.ok(
+                self.owner,
+                Role::Continuity,
+                None,
+                vec![],
+                Body::Policy(Policy {
+                    sub_kind: PolicySubKind::Agreement,
+                    body_ref: None,
+                    signers,
+                    adopts: vec![],
+                    advice_response: vec![],
+                    supersedes,
+                    reaffirms: None,
+                    envelope: None,
+                    asset_scope: assets.iter().map(|a| a.to_string()).collect(),
+                    start_funding_share_bp: None,
+                }),
+            )
+        }
+
+        fn keep_on(&mut self, asset: &str) -> Result<ObjectId, Rejection> {
+            self.try_(
+                self.owner,
+                Role::Execution,
+                None,
+                vec![],
+                Body::QueueKeep(QueueKeep {
+                    from: None,
+                    to: KeepState::Signalled,
+                    asset_ref: asset.into(),
+                    lead: None,
+                    adds_function: false,
+                    urgent_safety: false,
+                }),
+            )
+        }
+
+        fn move_keep(
+            &mut self,
+            item: ObjectId,
+            from: KeepState,
+            to: KeepState,
+        ) -> Result<ObjectId, Rejection> {
+            self.try_(
+                self.owner,
+                Role::Execution,
+                Some(item),
+                vec![],
+                Body::QueueKeep(QueueKeep {
+                    from: Some(from),
+                    to,
+                    asset_ref: "demo".into(),
+                    lead: None,
+                    adds_function: false,
+                    urgent_safety: false,
+                }),
+            )
+        }
+
+        fn failure(&mut self, kind: EventKind, subject: ObjectId) -> ObjectId {
+            self.ok(
+                self.owner,
+                Role::Execution,
+                Some(subject),
+                vec![],
+                Body::Event(Event {
+                    event: kind,
+                    impact: Some("test".into()),
+                    next_decision: Some(NextDecision {
+                        role: Role::Policy,
+                        by: 10,
+                        options: vec![],
+                    }),
+                    refs: vec![],
+                    detail: None,
+                }),
+            )
         }
 
         fn header(&mut self, signer: PrincipalId) -> ObjectHeader {
@@ -1985,5 +2200,102 @@ mod tests {
             "impact": null, "next_decision": null, "detail": null
         });
         assert_eq!(decode_payload(&v).unwrap_err().rule, "X-05.1");
+    }
+
+    #[test]
+    fn keep_needs_an_agreement_covering_the_asset() {
+        let mut h = Harness::solo_without_agreement();
+        assert_eq!(h.keep_on("demo").unwrap_err().rule, "K-01");
+        let agr = h.agreement(&["demo"]);
+        h.keep_on("demo").unwrap();
+        assert_eq!(h.keep_on("other").unwrap_err().rule, "K-01");
+        // Superseding the agreement with a narrower one removes coverage.
+        h.agreement_superseding(&["bridge"], Some(agr));
+        assert_eq!(h.keep_on("demo").unwrap_err().rule, "K-01");
+        h.keep_on("bridge").unwrap();
+        // The wildcard covers every asset.
+        h.agreement(&["*"]);
+        h.keep_on("anything").unwrap();
+    }
+
+    #[test]
+    fn deferring_needs_a_fresh_displacement_event() {
+        let mut h = Harness::solo();
+        let item = h.keep_item();
+        assert_eq!(
+            h.move_keep(item, KeepState::Signalled, KeepState::Deferred)
+                .unwrap_err()
+                .rule,
+            "K-09"
+        );
+        h.failure(EventKind::Displacement, item);
+        h.move_keep(item, KeepState::Signalled, KeepState::Planned)
+            .unwrap();
+        // The displacement predates the latest transition: refused again.
+        assert_eq!(
+            h.move_keep(item, KeepState::Planned, KeepState::Deferred)
+                .unwrap_err()
+                .rule,
+            "K-09"
+        );
+        h.failure(EventKind::Displacement, item);
+        h.move_keep(item, KeepState::Planned, KeepState::Deferred)
+            .unwrap();
+    }
+
+    #[test]
+    fn corrector_must_rank_at_least_the_original_signer() {
+        let mut h = Harness::solo();
+        let env = h.envelope(QueueKind::Build, 100, false).unwrap();
+        let correction = |c: ObjectId| {
+            Body::Correction(Correction {
+                corrects: c,
+                reason: "typo".into(),
+                replacement: None,
+                removal: false,
+            })
+        };
+        // Envelope was created by continuity; execution cannot correct it.
+        let r = h.try_(h.owner, Role::Execution, Some(env), vec![], correction(env));
+        assert_eq!(r.unwrap_err().rule, "C-06");
+        h.ok(
+            h.owner,
+            Role::Continuity,
+            Some(env),
+            vec![],
+            correction(env),
+        );
+        // An ingest signed by execution can be corrected by policy.
+        let art = h.ingest(b"draft", EvidenceTag::C);
+        h.ok(
+            h.owner,
+            Role::Policy,
+            Some(art.inner()),
+            vec![],
+            correction(art.inner()),
+        );
+        assert_eq!(h.state.origin_role(art.inner()), Some(Role::Execution));
+    }
+
+    #[test]
+    fn review_subject_must_exist() {
+        let mut h = Harness::solo();
+        let review = Body::Review(Review {
+            review: ReviewKind::Condition,
+            rhythm: Rhythm::Scheduled,
+            step: None,
+            artefact_ref: None,
+            trigger: None,
+        });
+        let r = h.try_(
+            h.owner,
+            Role::Execution,
+            Some(ObjectId::new_v7()),
+            vec![],
+            review.clone(),
+        );
+        assert_eq!(r.unwrap_err().rule, "V-01");
+        let item = h.keep_item();
+        h.ok(h.owner, Role::Execution, Some(item), vec![], review);
     }
 }

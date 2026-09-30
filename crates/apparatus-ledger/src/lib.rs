@@ -8,10 +8,14 @@ use apparatus_store::{ReceiptLedger, StoreError};
 use apparatus_types::{ObjectHeader, ReceiptId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use thiserror::Error;
+
+/// How long a writer waits for `LOCK` before giving up.
+pub const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Ledger-related errors.
 #[derive(Debug, Error)]
@@ -108,6 +112,16 @@ fn write_canonical(value: &Value, out: &mut Vec<u8>) -> Result<(), LedgerError> 
     Ok(())
 }
 
+/// Exclusive writer lock on `<dir>/LOCK`.
+///
+/// This is an OS advisory lock (`flock` on Unix, `LockFileEx` on Windows) held
+/// through the open file handle: it is released when the value is dropped or the
+/// process exits, so a crash never leaves a stale lock behind.
+#[derive(Debug)]
+pub struct LedgerLock {
+    _file: File,
+}
+
 /// A receipt read back from the ledger, with its verified hash.
 #[derive(Debug, Clone)]
 pub struct ChainEntry {
@@ -135,6 +149,37 @@ impl FileLedger {
 
     fn head_path(&self) -> PathBuf {
         self.dir.join("HEAD")
+    }
+
+    /// Take the exclusive writer lock, retrying until `timeout` elapses.
+    ///
+    /// Hold it around every read-check-append sequence so two processes never
+    /// append against the same HEAD.
+    pub fn lock(&self, timeout: Duration) -> Result<LedgerLock, StoreError> {
+        fs::create_dir_all(&self.dir)?;
+        let path = self.dir.join("LOCK");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)?;
+        let start = Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(LedgerLock { _file: file }),
+                Err(TryLockError::WouldBlock) => {
+                    if start.elapsed() >= timeout {
+                        return Err(StoreError::Locked(format!(
+                            "{} is held by another writer; gave up after {} ms",
+                            path.display(),
+                            timeout.as_millis()
+                        )));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(TryLockError::Error(e)) => return Err(e.into()),
+            }
+        }
     }
 
     /// The current head, or `None` for an empty chain.
@@ -466,6 +511,19 @@ mod tests {
             ledger.verify_chain(),
             Err(LedgerError::Integrity { .. })
         ));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn writer_lock_is_exclusive_and_released_on_drop() {
+        let dir = temp_dir("lock");
+        let ledger = FileLedger::new(&dir);
+        let held = ledger.lock(Duration::from_millis(10)).unwrap();
+        let second = FileLedger::new(&dir).lock(Duration::from_millis(50));
+        assert!(matches!(second, Err(StoreError::Locked(_))));
+        drop(held);
+        let again = FileLedger::new(&dir).lock(Duration::from_millis(50));
+        assert!(again.is_ok());
         fs::remove_dir_all(dir).ok();
     }
 }

@@ -8,11 +8,11 @@ mod kernel;
 
 use anyhow::{anyhow, bail, Context, Result};
 use apparatus_crypto::Sha256Digest;
-use apparatus_schema::rws::ItemState;
+use apparatus_schema::rws::{role_rank, ItemState};
 use apparatus_types::rws::*;
 use apparatus_types::{ArtifactId, Classification, ObjectId};
 use clap::{Args, Parser, Subcommand};
-use kernel::{apparatus_dir, buffer_path, line, Kernel, Submit, DAY_MS};
+use kernel::{apparatus_dir, buffer_path, line, BatchPart, Kernel, Submit, DAY_MS};
 use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -103,6 +103,12 @@ enum Rws {
         urgent_safety: bool,
         #[arg(long)]
         evidence: Vec<ArtifactId>,
+        /// With `--to deferred`: the work item that displaces this one.
+        #[arg(long)]
+        by: Option<ObjectId>,
+        /// With `--to deferred`: why it is displaced (the displacement impact).
+        #[arg(long)]
+        reason: Option<String>,
         #[command(flatten)]
         signing: Signing,
     },
@@ -181,6 +187,41 @@ enum Rws {
         input: Vec<ObjectId>,
         #[arg(long, default_value = "human", value_parser = parse_enum::<PrincipalKind>)]
         producer_kind: PrincipalKind,
+        #[command(flatten)]
+        signing: Signing,
+    },
+    /// Correct an earlier object (C-06). The corrector must rank at least the original signer.
+    Correction {
+        #[arg(long)]
+        corrects: ObjectId,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        replacement: Option<ObjectId>,
+        /// Lawful removal (bytes replaced by a tombstone later; the receipt stays).
+        #[arg(long)]
+        removal: bool,
+        #[command(flatten)]
+        signing: Signing,
+    },
+    /// Record a review (V-01..V-04).
+    Review {
+        #[arg(long = "kind", value_parser = parse_enum::<ReviewKind>)]
+        review: ReviewKind,
+        #[arg(long)]
+        subject: ObjectId,
+        /// Out-of-cycle review; needs `--trigger`.
+        #[arg(long)]
+        out_of_cycle: bool,
+        #[arg(long)]
+        trigger: Option<ObjectId>,
+        #[arg(long, default_value = "event")]
+        trigger_type: String,
+        /// Strategic review step 1..6.
+        #[arg(long)]
+        step: Option<u8>,
+        #[arg(long)]
+        artefact: Option<ArtifactId>,
         #[command(flatten)]
         signing: Signing,
     },
@@ -306,6 +347,17 @@ fn report(result: Submit) -> ExitCode {
     }
 }
 
+fn report_all(results: Vec<Submit>) -> ExitCode {
+    let mut code = ExitCode::SUCCESS;
+    for r in results {
+        let c = report(r);
+        if c != ExitCode::SUCCESS {
+            code = c;
+        }
+    }
+    code
+}
+
 fn rws(root: &Path, cmd: Rws) -> Result<ExitCode> {
     match cmd {
         Rws::Init {
@@ -320,13 +372,80 @@ fn rws(root: &Path, cmd: Rws) -> Result<ExitCode> {
         Rws::Show { id } => show(&Kernel::open(root)?, id),
         other => {
             let mut k = Kernel::open(root)?;
-            let result = write(&mut k, other)?;
-            Ok(report(result))
+            let results = write(&mut k, other)?;
+            Ok(report_all(results))
         }
     }
 }
 
-fn write(k: &mut Kernel, cmd: Rws) -> Result<Submit> {
+/// Write one command. Deferring a keep item is two receipts in one locked unit:
+/// the `displacement` event K-09 requires, then the `queue_keep` transition.
+fn write(k: &mut Kernel, cmd: Rws) -> Result<Vec<Submit>> {
+    if let Rws::Queue {
+        queue: QueueKind::Keep,
+        item: Some(item),
+        to: Some(KeepState::Deferred),
+        by,
+        reason,
+        lead,
+        signing,
+        evidence,
+        ..
+    } = cmd
+    {
+        let (signer, _) = k.principal(signing.as_name.as_deref());
+        let role = signing.role.unwrap_or(Role::Execution);
+        let (current, asset_ref) = match k.state.item(item) {
+            Some(i) => (
+                match i.state {
+                    ItemState::Keep(s) => Some(s),
+                    _ => None,
+                },
+                i.asset_ref.clone(),
+            ),
+            None => (None, String::new()),
+        };
+        let lead = lead.map(|l| k.principal(Some(&l)).0);
+        let displacement = Body::Event(Event {
+            event: EventKind::Displacement,
+            impact: Some(reason.unwrap_or_else(|| "displaced; reason not stated".into())),
+            next_decision: Some(NextDecision {
+                role: EventKind::Displacement.default_next_role(),
+                by: k.now() + 7 * DAY_MS,
+                options: vec!["re-plan at next programme refresh".into()],
+            }),
+            refs: by.into_iter().collect(),
+            detail: None,
+        });
+        let defer = Body::QueueKeep(QueueKeep {
+            from: current,
+            to: KeepState::Deferred,
+            asset_ref,
+            lead,
+            adds_function: false,
+            urgent_safety: false,
+        });
+        return k.submit_batch(vec![
+            BatchPart {
+                signer,
+                role,
+                subject: Some(item),
+                evidence: vec![],
+                body: displacement,
+            },
+            BatchPart {
+                signer,
+                role,
+                subject: Some(item),
+                evidence,
+                body: defer,
+            },
+        ]);
+    }
+    write_one(k, cmd).map(|s| vec![s])
+}
+
+fn write_one(k: &mut Kernel, cmd: Rws) -> Result<Submit> {
     use Role::*;
     match cmd {
         Rws::RoleBind {
@@ -423,6 +542,7 @@ fn write(k: &mut Kernel, cmd: Rws) -> Result<Submit> {
             urgent_safety,
             evidence,
             signing,
+            ..
         } => {
             let (signer, _) = k.principal(signing.as_name.as_deref());
             let lead = lead.map(|l| k.principal(Some(&l)).0);
@@ -659,6 +779,82 @@ fn write(k: &mut Kernel, cmd: Rws) -> Result<Submit> {
                     inputs: input,
                     addressed_to: None,
                     respond_by: None,
+                }),
+            )
+        }
+        Rws::Correction {
+            corrects,
+            reason,
+            replacement,
+            removal,
+            signing,
+        } => {
+            let (signer, _) = k.principal(signing.as_name.as_deref());
+            // Default: the lowest held role that still ranks at least the original signer.
+            let floor = k.state.origin_role(corrects).map(role_rank).unwrap_or(0);
+            let mut candidates = [
+                Adviser,
+                Coordinator,
+                Execution,
+                Policy,
+                MandateHolder,
+                Continuity,
+            ];
+            candidates.sort_by_key(|r| role_rank(*r));
+            let role = signing.role.unwrap_or_else(|| {
+                candidates
+                    .into_iter()
+                    .find(|r| role_rank(*r) >= floor && k.state.holds(signer, *r))
+                    .unwrap_or(Continuity)
+            });
+            k.submit(
+                signer,
+                role,
+                Some(corrects),
+                vec![],
+                Body::Correction(Correction {
+                    corrects,
+                    reason,
+                    replacement,
+                    removal,
+                }),
+            )
+        }
+        Rws::Review {
+            review,
+            subject,
+            out_of_cycle,
+            trigger,
+            trigger_type,
+            step,
+            artefact,
+            signing,
+        } => {
+            let (signer, _) = k.principal(signing.as_name.as_deref());
+            let preferred: &[Role] = match review {
+                ReviewKind::Condition | ReviewKind::Replica => &[Execution, Policy, Continuity],
+                ReviewKind::Account => &[Continuity, Policy, Execution],
+                _ => &[Policy, Continuity, Execution],
+            };
+            let role = k.pick_role(signer, signing.role, preferred);
+            k.submit(
+                signer,
+                role,
+                Some(subject),
+                vec![],
+                Body::Review(Review {
+                    review,
+                    rhythm: if out_of_cycle {
+                        Rhythm::OutOfCycle
+                    } else {
+                        Rhythm::Scheduled
+                    },
+                    step,
+                    artefact_ref: artefact,
+                    trigger: trigger.map(|t| Trigger {
+                        trigger_type,
+                        trigger_ref: t,
+                    }),
                 }),
             )
         }

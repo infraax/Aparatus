@@ -114,6 +114,11 @@ fn solo_demo_and_refusals_are_recorded() {
     );
     assert_eq!(again.status.code(), Some(2));
 
+    assert!(
+        run(&dir, &["rws", "policy", "agreement", "--asset", "demo"])
+            .status
+            .success()
+    );
     let keep = run(&dir, &["rws", "queue", "keep", "--asset", "demo"]);
     assert!(keep.status.success());
     let item = last_id(&keep);
@@ -176,6 +181,11 @@ fn solo_demo_and_refusals_are_recorded() {
 fn check_fails_on_tampered_ledger() {
     let dir = tempdir("tamper");
     assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    assert!(
+        run(&dir, &["rws", "policy", "agreement", "--asset", "demo"])
+            .status
+            .success()
+    );
     assert!(run(&dir, &["rws", "queue", "keep", "--asset", "demo"])
         .status
         .success());
@@ -192,6 +202,11 @@ fn check_fails_on_tampered_ledger() {
 fn buffer_is_imported_once_then_frozen() {
     let src = tempdir("buffer-src");
     assert!(run(&src, &["rws", "init", "--solo"]).status.success());
+    assert!(
+        run(&src, &["rws", "policy", "agreement", "--asset", "demo"])
+            .status
+            .success()
+    );
     assert!(run(&src, &["rws", "queue", "keep", "--asset", "demo"])
         .status
         .success());
@@ -232,4 +247,322 @@ fn buffer_is_imported_once_then_frozen() {
     assert!(run(&dst, &["rws", "check"]).status.success());
     fs::remove_dir_all(src).ok();
     fs::remove_dir_all(dst).ok();
+}
+
+fn stderr(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+/// Second token of the first stdout line (artifact id / envelope id).
+fn first_object(o: &Output) -> String {
+    stdout(o)
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn keep_is_refused_until_an_agreement_covers_the_asset() {
+    let dir = tempdir("k01");
+    assert!(run(&dir, &["rws", "init"]).status.success());
+    for role in ["policy", "execution", "mandate_holder"] {
+        let o = run(
+            &dir,
+            &["rws", "role-bind", "--role", role, "--principal", "owner"],
+        );
+        assert!(o.status.success(), "{}", stderr(&o));
+    }
+    let early = run(&dir, &["rws", "queue", "keep", "--asset", "demo"]);
+    assert_eq!(early.status.code(), Some(2));
+    assert!(stderr(&early).contains("K-01"));
+    assert!(
+        stdout(&early).contains(" event "),
+        "refusal is recorded on the chain"
+    );
+
+    assert!(
+        run(&dir, &["rws", "policy", "agreement", "--asset", "demo"])
+            .status
+            .success()
+    );
+    assert!(run(&dir, &["rws", "queue", "keep", "--asset", "demo"])
+        .status
+        .success());
+    let other = run(&dir, &["rws", "queue", "keep", "--asset", "other"]);
+    assert_eq!(other.status.code(), Some(2));
+    assert!(stderr(&other).contains("K-01"));
+
+    let check = stdout(&run(&dir, &["rws", "check"]));
+    assert!(check.contains("refusals recorded: 2"), "{check}");
+    assert!(check.contains("K-01"), "{check}");
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn solo_init_binds_four_roles_and_handover_needs_no_extra_bind() {
+    let dir = tempdir("solo-g4");
+    let init = run(&dir, &["rws", "init", "--solo"]);
+    assert_eq!(
+        stdout(&init)
+            .lines()
+            .filter(|l| l.contains(" role_bind "))
+            .count(),
+        4
+    );
+    assert!(stdout(&run(&dir, &["rws", "check"])).contains("role mandate_holder: owner"));
+
+    fs::write(dir.join("dossier.md"), b"project dossier\n").unwrap();
+    let dossier = dir.join("dossier.md");
+    let ev = first_object(&run(
+        &dir,
+        &[
+            "rws",
+            "ingest",
+            dossier.to_str().unwrap(),
+            "--purpose",
+            "gate",
+            "--tag",
+            "A",
+        ],
+    ));
+    let env = first_object(&run(
+        &dir,
+        &[
+            "rws",
+            "policy",
+            "envelope",
+            "--queue",
+            "build",
+            "--ceiling",
+            "1000",
+        ],
+    ));
+    let agreement = last_id(&run(
+        &dir,
+        &["rws", "policy", "agreement", "--asset", "bridge"],
+    ));
+    let item = last_id(&run(&dir, &["rws", "queue", "build", "--asset", "bridge"]));
+    for gate in ["start", "preferred", "project"] {
+        let o = run(
+            &dir,
+            &[
+                "rws",
+                "gate",
+                "--item",
+                &item,
+                "--gate",
+                gate,
+                "--outcome",
+                "go",
+                "--evidence",
+                &ev,
+                "--envelope",
+                &env,
+                "--required",
+                "800",
+            ],
+        );
+        assert!(o.status.success(), "{gate}: {}", stderr(&o));
+    }
+    let g4 = run(
+        &dir,
+        &[
+            "rws",
+            "gate",
+            "--item",
+            &item,
+            "--gate",
+            "handover",
+            "--outcome",
+            "go",
+            "--evidence",
+            &ev,
+            "--discharge",
+            "owner",
+            "--agreement",
+            &agreement,
+        ],
+    );
+    assert!(g4.status.success(), "{}", stderr(&g4));
+    assert!(stdout(&run(&dir, &["rws", "show", &item])).contains("state=HandedOver"));
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn correction_and_review_commands() {
+    let dir = tempdir("corr");
+    assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    fs::write(dir.join("a.md"), b"draft\n").unwrap();
+    let a = dir.join("a.md");
+    let ingest = run(
+        &dir,
+        &[
+            "rws",
+            "ingest",
+            a.to_str().unwrap(),
+            "--purpose",
+            "corpus",
+            "--tag",
+            "C",
+        ],
+    );
+    let receipt = last_id(&ingest);
+    let fix = run(
+        &dir,
+        &[
+            "rws",
+            "correction",
+            "--corrects",
+            &receipt,
+            "--reason",
+            "tag should be B",
+        ],
+    );
+    assert!(fix.status.success(), "{}", stderr(&fix));
+    assert!(stdout(&fix).contains(" correction "));
+
+    // An envelope is created by continuity: execution may not correct it (C-06).
+    let env = first_object(&run(
+        &dir,
+        &[
+            "rws",
+            "policy",
+            "envelope",
+            "--queue",
+            "build",
+            "--ceiling",
+            "10",
+        ],
+    ));
+    let low = run(
+        &dir,
+        &[
+            "rws",
+            "correction",
+            "--corrects",
+            &env,
+            "--reason",
+            "x",
+            "--role",
+            "execution",
+        ],
+    );
+    assert_eq!(low.status.code(), Some(2));
+    assert!(stderr(&low).contains("C-06"));
+
+    assert!(run(&dir, &["rws", "policy", "agreement", "--asset", "*"])
+        .status
+        .success());
+    let item = last_id(&run(&dir, &["rws", "queue", "keep", "--asset", "pump"]));
+    let review = run(
+        &dir,
+        &["rws", "review", "--kind", "condition", "--subject", &item],
+    );
+    assert!(review.status.success(), "{}", stderr(&review));
+    assert!(stdout(&review).contains(" review "));
+    // Out of cycle without a named trigger: refused (V-04).
+    let ooc = run(
+        &dir,
+        &[
+            "rws",
+            "review",
+            "--kind",
+            "condition",
+            "--subject",
+            &item,
+            "--out-of-cycle",
+        ],
+    );
+    assert_eq!(ooc.status.code(), Some(2));
+    assert!(stderr(&ooc).contains("V-04"));
+    assert!(run(&dir, &["rws", "check"]).status.success());
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn deferring_writes_displacement_then_transition() {
+    let dir = tempdir("defer");
+    assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    assert!(run(&dir, &["rws", "policy", "agreement", "--asset", "*"])
+        .status
+        .success());
+    let a = last_id(&run(
+        &dir,
+        &["rws", "queue", "keep", "--asset", "lock-gate"],
+    ));
+    let b = last_id(&run(&dir, &["rws", "queue", "keep", "--asset", "bridge"]));
+    let defer = run(
+        &dir,
+        &[
+            "rws",
+            "queue",
+            "keep",
+            "--item",
+            &a,
+            "--to",
+            "deferred",
+            "--by",
+            &b,
+            "--reason",
+            "bridge first",
+        ],
+    );
+    assert!(defer.status.success(), "{}", stderr(&defer));
+    let lines: Vec<String> = stdout(&defer).lines().map(String::from).collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].contains(" event ") && lines[1].contains(" queue_keep "));
+    let check = stdout(&run(&dir, &["rws", "check"]));
+    assert!(check.contains("Displacement"), "{check}");
+    assert!(check.contains("keep Deferred"), "{check}");
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn parallel_ingests_never_corrupt_the_chain() {
+    let dir = tempdir("parallel");
+    assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    let n = 8;
+    for i in 0..n {
+        fs::write(dir.join(format!("f{i}.txt")), format!("file {i}\n")).unwrap();
+    }
+    // Start every process before waiting on any, so they contend for the lock.
+    let children: Vec<_> = (0..n)
+        .map(|i| {
+            Command::new(env!("CARGO_BIN_EXE_apparatus"))
+                .arg("--project")
+                .arg(&dir)
+                .args(["rws", "ingest"])
+                .arg(dir.join(format!("f{i}.txt")))
+                .args(["--purpose", "load", "--tag", "C"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    let mut accepted = 0;
+    for child in children {
+        let o = child.wait_with_output().unwrap();
+        match o.status.code() {
+            Some(0) => accepted += 1,
+            // Only a clean lock timeout is an acceptable failure.
+            Some(1) => assert!(
+                stderr(&o).contains("another apparatus process"),
+                "{}",
+                stderr(&o)
+            ),
+            other => panic!("unexpected exit {other:?}: {}", stderr(&o)),
+        }
+    }
+    assert!(accepted > 0);
+    let check = run(&dir, &["rws", "check"]);
+    assert!(check.status.success(), "{}", stdout(&check));
+    assert!(stdout(&check).contains(&format!("cas ok: {accepted} artefacts verified")));
+    let ledger = fs::read_to_string(dir.join(".apparatus/ledger.jsonl")).unwrap();
+    assert_eq!(ledger.matches("\"kind\":\"ingest\"").count(), accepted);
+    fs::remove_dir_all(dir).ok();
 }

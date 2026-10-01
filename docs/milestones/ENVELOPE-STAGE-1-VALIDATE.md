@@ -91,7 +91,8 @@ chain and is all-or-nothing (X-11): it dry-runs every line first and refuses the
 Result: exit 1, no `ledger.jsonl`, buffer not frozen. ENV-09 fired; there is no chain to record it on. Changing that
 would extend the import rules, which this validation does not do.
 Side effect seen (pre-existing, not Stage 1): the refused import leaves `.apparatus/project.json`, `LOCK` and `cas/`
-in the target directory. A later import into it then fails on the empty-chain check, not on ENV-09.
+in the target directory. Checked: importing the same buffer again refuses on ENV-09 again (exit 1); importing the
+5 good lines alone then succeeds (exit 0, buffer frozen). The leftover files do not block a correct import.
 
 Replay path, same crafted line appended directly to a copy of `$S-src` with a correct `previous_hash` and `HEAD`:
 

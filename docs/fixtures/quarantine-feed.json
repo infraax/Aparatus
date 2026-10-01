@@ -1,0 +1,13 @@
+{
+  "feed": "fixture",
+  "advisories": [
+    {
+      "id": "FIXTURE-2026-0001",
+      "ecosystem": "cargo",
+      "package": "lazy_static",
+      "bad_versions": ["1.5.1"],
+      "recommended": "1.5.0",
+      "url": "https://example.invalid/FIXTURE-2026-0001 (fixture, not a real advisory)"
+    }
+  ]
+}

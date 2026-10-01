@@ -965,3 +965,237 @@ fn ic_status_records_height_once_and_refuses_when_down() {
     assert!(stdout(&check).contains("refusals recorded: 1"));
     fs::remove_dir_all(dir).ok();
 }
+
+// ---- Package quarantine (Aparatus #21), fixtures only, no network ----
+
+fn rfc3339_days_ago(days: i64) -> String {
+    (time::OffsetDateTime::now_utc() - time::Duration::days(days))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap()
+}
+
+fn cargo_lock(pins: &[(&str, &str, &str)]) -> String {
+    let mut s = String::from("version = 4\n");
+    for (n, v, c) in pins {
+        s.push_str(&format!(
+            "\n[[package]]\nname = \"{n}\"\nversion = \"{v}\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"{c}\"\n"
+        ));
+    }
+    s
+}
+
+fn registry(dir: &Path, entries: &[(&str, &str, &str, i64)]) -> PathBuf {
+    let list: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|(n, v, c, age)| {
+            serde_json::json!({"ecosystem":"cargo","name":n,"version":v,"integrity":c,"published_at":rfc3339_days_ago(*age)})
+        })
+        .collect();
+    let p = dir.join("registry.json");
+    fs::write(&p, serde_json::to_string(&list).unwrap()).unwrap();
+    p
+}
+
+fn quarantine(dir: &Path, lock: &Path, reg: &Path, extra: &[&str]) -> Output {
+    let mut args = vec![
+        "rws",
+        "quarantine",
+        "--lockfile",
+        lock.to_str().unwrap(),
+        "--registry-fixture",
+        reg.to_str().unwrap(),
+    ];
+    args.extend_from_slice(extra);
+    run(dir, &args)
+}
+
+fn quarantine_envelopes(dir: &Path) -> Vec<serde_json::Value> {
+    ledger_envelopes(dir)
+        .into_iter()
+        .filter(|e| e["module"] == "apparatus.quarantine")
+        .collect()
+}
+
+#[test]
+fn quarantine_young_version_waits_and_keeps_previous_pin() {
+    let dir = tempdir("qyoung");
+    assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    let lock = dir.join("Cargo.lock");
+    let reg = registry(
+        &dir,
+        &[("foo", "1.0.0", "aa", 30), ("foo", "1.1.0", "bb", 0)],
+    );
+
+    fs::write(&lock, cargo_lock(&[("foo", "1.0.0", "aa")])).unwrap();
+    let o = quarantine(&dir, &lock, &reg, &[]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        stdout(&o).contains("1 adopted, 0 waiting"),
+        "{}",
+        stdout(&o)
+    );
+
+    // Lockfile now pins 1.1.0, published today: it waits; the adopted pin stays 1.0.0.
+    let young = cargo_lock(&[("foo", "1.1.0", "bb")]);
+    fs::write(&lock, &young).unwrap();
+    let o = quarantine(&dir, &lock, &reg, &[]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let text = stdout(&o);
+    assert!(
+        text.contains("pin cargo:foo@1.1.0 waiting (age 0d < 5d); adopted stays 1.0.0"),
+        "{text}"
+    );
+    assert_eq!(
+        fs::read_to_string(&lock).unwrap(),
+        young,
+        "lockfile not modified"
+    );
+
+    let envs = quarantine_envelopes(&dir);
+    assert_eq!(envs.len(), 2);
+    assert_eq!(envs[0]["event_id"], "quarantine:cargo:foo@1.0.0:adopted");
+    assert_eq!(envs[0]["provenance"], "measured");
+    assert_eq!(envs[0]["evidence_tag"], "B");
+    assert_eq!(envs[0]["payload"]["integrity"], "aa");
+    assert_eq!(envs[1]["payload"]["status"], "waiting");
+    assert_eq!(envs[1]["payload"]["adopted"], "1.0.0");
+
+    // A rescan records nothing new.
+    let o = quarantine(&dir, &lock, &reg, &[]);
+    assert!(stdout(&o).contains("1 already recorded"), "{}", stdout(&o));
+    assert_eq!(quarantine_envelopes(&dir).len(), 2);
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn quarantine_hash_mismatch_is_refused_on_chain() {
+    let dir = tempdir("qhash");
+    assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    let lock = dir.join("Cargo.lock");
+    fs::write(
+        &lock,
+        cargo_lock(&[("foo", "1.0.0", "aa"), ("bar", "2.0.0", "cc")]),
+    )
+    .unwrap();
+    // The registry says foo@1.0.0 is "ff", not "aa".
+    let reg = registry(
+        &dir,
+        &[("foo", "1.0.0", "ff", 30), ("bar", "2.0.0", "cc", 30)],
+    );
+    let o = quarantine(&dir, &lock, &reg, &[]);
+    assert_eq!(o.status.code(), Some(2), "{}", stdout(&o));
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        stderr.contains("REFUSED Q-01: cargo:foo@1.0.0 hash mismatch"),
+        "{stderr}"
+    );
+    assert!(stdout(&o).contains(" event "), "refusal is a receipt");
+    // The good pin is still recorded; the bad one is not adopted.
+    let envs = quarantine_envelopes(&dir);
+    assert_eq!(envs.len(), 1);
+    assert_eq!(envs[0]["payload"]["name"], "bar");
+    let check = run(&dir, &["rws", "check"]);
+    assert!(check.status.success(), "{}", stdout(&check));
+    assert!(stdout(&check).contains("refusals recorded: 1"));
+    // Regression: an already-adopted pin with a tampered lockfile hash is still refused.
+    fs::write(&lock, cargo_lock(&[("bar", "2.0.0", "c0")])).unwrap();
+    let o = quarantine(&dir, &lock, &reg, &[]);
+    assert_eq!(o.status.code(), Some(2), "{}", stdout(&o));
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("REFUSED Q-01: cargo:bar@2.0.0 hash mismatch")
+    );
+    fs::write(
+        &lock,
+        cargo_lock(&[("foo", "1.0.0", "aa"), ("bar", "2.0.0", "cc")]),
+    )
+    .unwrap();
+    // Not in the registry at all: Q-02.
+    let reg2 = registry(&dir, &[("bar", "2.0.0", "cc", 30)]);
+    let o = quarantine(&dir, &lock, &reg2, &[]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("REFUSED Q-02"));
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn quarantine_advisory_writes_advice_and_leaves_lockfile() {
+    let dir = tempdir("qadv");
+    assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    let lock = dir.join("Cargo.lock");
+    let text = cargo_lock(&[("foo", "1.0.0", "aa")]);
+    fs::write(&lock, &text).unwrap();
+    let reg = registry(&dir, &[("foo", "1.0.0", "aa", 30)]);
+    let feed = dir.join("feed.json");
+    fs::write(
+        &feed,
+        r#"{"feed":"fixture","advisories":[{"id":"FIX-2026-0001","ecosystem":"cargo","package":"foo","bad_versions":["1.0.0"],"recommended":"1.0.1","url":"https://example.invalid/FIX-2026-0001"}]}"#,
+    )
+    .unwrap();
+    let o = quarantine(
+        &dir,
+        &lock,
+        &reg,
+        &["--advisory-feed", feed.to_str().unwrap()],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(stdout(&o).contains("advice fixture:FIX-2026-0001 for cargo:foo@1.0.0"));
+    assert_eq!(
+        fs::read_to_string(&lock).unwrap(),
+        text,
+        "lockfile not modified"
+    );
+
+    let ledger: Vec<serde_json::Value> = fs::read_to_string(dir.join(".apparatus/ledger.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["operation_payload"].clone())
+        .collect();
+    let advice: Vec<_> = ledger.iter().filter(|p| p["kind"] == "advice").collect();
+    assert_eq!(advice.len(), 1);
+    let summary = advice[0]["summary"].as_str().unwrap();
+    assert!(summary.contains("fixture:FIX-2026-0001") && summary.contains("recommended 1.0.1"));
+    assert!(summary.contains("not applied"));
+    assert_eq!(
+        advice[0]["inputs"].as_array().unwrap().len(),
+        1,
+        "links the pin receipt"
+    );
+    // Advice is not policy: no policy receipt beyond init, nothing adopted differently.
+    assert_eq!(ledger.iter().filter(|p| p["kind"] == "policy").count(), 0);
+    // Rescan: the same advice is not written twice.
+    let o = quarantine(
+        &dir,
+        &lock,
+        &reg,
+        &["--advisory-feed", feed.to_str().unwrap()],
+    );
+    assert!(stdout(&o).contains("0 advice"), "{}", stdout(&o));
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn quarantine_wait_override_needs_a_reason_and_is_recorded() {
+    let dir = tempdir("qwait");
+    assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    let lock = dir.join("Cargo.lock");
+    fs::write(&lock, cargo_lock(&[("foo", "1.1.0", "bb")])).unwrap();
+    let reg = registry(&dir, &[("foo", "1.1.0", "bb", 0)]);
+    let o = quarantine(&dir, &lock, &reg, &["--wait-days", "0"]);
+    assert_eq!(o.status.code(), Some(1), "no silent zero");
+    assert!(quarantine_envelopes(&dir).is_empty());
+    let o = quarantine(
+        &dir,
+        &lock,
+        &reg,
+        &["--wait-days", "0", "--reason", "fixture test"],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let envs = quarantine_envelopes(&dir);
+    assert_eq!(envs.len(), 2);
+    assert_eq!(envs[0]["provenance"], "stated");
+    assert_eq!(envs[0]["payload"]["wait_days"], 0);
+    assert_eq!(envs[0]["payload"]["default_wait_days"], 5);
+    assert_eq!(envs[0]["payload"]["reason"], "fixture test");
+    assert_eq!(envs[1]["payload"]["status"], "adopted");
+    fs::remove_dir_all(dir).ok();
+}

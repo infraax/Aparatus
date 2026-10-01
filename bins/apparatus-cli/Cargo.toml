@@ -12,7 +12,11 @@ path = "src/main.rs"
 apparatus-types = { path = "../../crates/apparatus-types" }
 apparatus-kernel = { path = "../../crates/apparatus-kernel" }
 apparatus-ic = { path = "../../crates/apparatus-ic" }
+apparatus-quarantine = { path = "../../crates/apparatus-quarantine" }
 clap = { workspace = true, features = ["derive"] }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+time.workspace = true

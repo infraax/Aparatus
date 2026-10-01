@@ -287,6 +287,28 @@ enum Rws {
     /// Local IC replica commands.
     #[command(subcommand)]
     Ic(IcCmd),
+    /// Package quarantine: record lockfile pins (hash + age), refuse hash mismatches,
+    /// turn feed advisories into Advice. Never writes a lockfile.
+    Quarantine {
+        /// Lockfile to scan (repeatable). Default: Cargo.lock, and package-lock.json /
+        /// pnpm-lock.yaml if present, in the project directory.
+        #[arg(long = "lockfile")]
+        lockfiles: Vec<PathBuf>,
+        /// Days a version must be public before it is adopted. Not the default only with --reason.
+        #[arg(long, default_value_t = apparatus_types::quarantine::DEFAULT_WAIT_DAYS)]
+        wait_days: u64,
+        /// Why the wait is overridden. The override is written as its own receipt.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Use a local registry fixture instead of crates.io / npm (tests, offline).
+        #[arg(long)]
+        registry_fixture: Option<PathBuf>,
+        /// Local advisory feed file. A match writes Advice; nothing is applied.
+        #[arg(long)]
+        advisory_feed: Option<PathBuf>,
+        #[command(flatten)]
+        signing: Signing,
+    },
     /// List tickets.
     Tickets {
         #[arg(long)]
@@ -423,6 +445,51 @@ fn rws(root: &Path, cmd: Rws) -> Result<ExitCode> {
             refuse_if_daemon(root)?;
             print_lines(Kernel::import_jsonl(root, &path, None, false)?);
             Ok(ExitCode::SUCCESS)
+        }
+        Rws::Quarantine {
+            lockfiles,
+            wait_days,
+            reason,
+            registry_fixture,
+            advisory_feed,
+            signing,
+        } => {
+            if wait_days != apparatus_types::quarantine::DEFAULT_WAIT_DAYS && reason.is_none() {
+                anyhow::bail!(
+                    "--wait-days other than the default needs --reason (the override is recorded)"
+                );
+            }
+            let files = if lockfiles.is_empty() {
+                apparatus_quarantine::default_lockfiles(root)
+            } else {
+                lockfiles
+            };
+            if files.is_empty() {
+                anyhow::bail!("no lockfile found in {}", root.display());
+            }
+            let mut pins = Vec::new();
+            for f in &files {
+                pins.extend(apparatus_quarantine::parse_lockfile(f)?);
+            }
+            let registry = match &registry_fixture {
+                Some(p) => apparatus_quarantine::Registry::fixture(p)?,
+                None => apparatus_quarantine::Registry::online()?,
+            };
+            let observed = registry.observe(&pins);
+            let advisories = match &advisory_feed {
+                Some(p) => apparatus_quarantine::load_feed(p)?,
+                None => vec![],
+            };
+            let req = req(
+                &signing,
+                Op::Quarantine {
+                    wait_days,
+                    override_reason: reason,
+                    pins: observed,
+                    advisories,
+                },
+            );
+            Ok(ExitCode::from(dispatch(root, req)?))
         }
         other => {
             let req = to_request(other)?;
@@ -795,6 +862,7 @@ fn to_request(cmd: Rws) -> Result<Request> {
                 },
             )
         }
+        Rws::Quarantine { .. } => unreachable!("handled in rws()"),
         Rws::Ic(IcCmd::Status { url, signing }) => {
             let status_url = apparatus_ic::status_url(&url);
             let reading = match apparatus_ic::status(&url) {

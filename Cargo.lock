@@ -93,10 +93,12 @@ dependencies = [
  "anyhow",
  "apparatus-ic",
  "apparatus-kernel",
+ "apparatus-quarantine",
  "apparatus-types",
  "clap",
  "serde",
  "serde_json",
+ "time",
 ]
 
 [[package]]
@@ -148,6 +150,18 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "apparatus-quarantine"
+version = "0.1.0"
+dependencies = [
+ "apparatus-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "time",
 ]
 
 [[package]]

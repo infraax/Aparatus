@@ -8,6 +8,7 @@ use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
 
+pub mod quarantine;
 pub mod rws;
 
 /// A generalized Object ID, currently implemented as UUIDv7.

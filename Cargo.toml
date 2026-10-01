@@ -9,6 +9,7 @@ members = [
     "crates/apparatus-ledger",
     "crates/apparatus-kernel",
     "crates/apparatus-ic",
+    "crates/apparatus-quarantine",
     "bins/apparatus-cli",
     "bins/apparatusd"
 ]

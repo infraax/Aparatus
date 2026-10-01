@@ -465,3 +465,38 @@ fn ic_status_over_rpc_duplicate_and_refusals() {
     assert!(terminate(daemon).success());
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn quarantine_over_rpc_records_and_refuses() {
+    use apparatus_types::quarantine::{Ecosystem, PinObservation};
+    let dir = solo_project("q");
+    let daemon = start(&dir);
+    let mut c = client(&dir);
+    let pin = |name: &str, lock: &str, reg: &str| PinObservation {
+        ecosystem: Ecosystem::Cargo,
+        name: name.into(),
+        version: "1.0.0".into(),
+        lock_integrity: lock.into(),
+        registry_integrity: Some(reg.into()),
+        published_at: Some(1_000),
+        registry: "fixture:test".into(),
+        lookup_error: None,
+        lockfile: "Cargo.lock".into(),
+    };
+    let r = c
+        .call(&as_owner(Op::Quarantine {
+            wait_days: 5,
+            override_reason: None,
+            pins: vec![pin("good", "aa", "aa"), pin("evil", "aa", "ff")],
+            advisories: vec![],
+        }))
+        .unwrap();
+    assert_eq!(r.status, Status::Refused, "{r:?}");
+    assert_eq!(r.rule.as_deref(), Some("Q-01"));
+    assert!(r.lines.iter().any(|l| l.contains("1 adopted")), "{r:?}");
+    let check = cli(&dir, &["rws", "check"]);
+    assert!(check.status.success(), "{}", out(&check));
+    assert!(out(&check).contains("refusals recorded: 1"));
+    assert!(terminate(daemon).success());
+    std::fs::remove_dir_all(dir).ok();
+}

@@ -1,0 +1,15 @@
+[package]
+name = "apparatusd"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+apparatus-kernel = { path = "../../crates/apparatus-kernel" }
+clap = { workspace = true, features = ["derive"] }
+anyhow.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+apparatus-types = { path = "../../crates/apparatus-types" }

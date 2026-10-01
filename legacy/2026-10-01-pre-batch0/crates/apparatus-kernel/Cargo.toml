@@ -1,0 +1,16 @@
+[package]
+name = "apparatus-kernel"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+apparatus-types = { path = "../apparatus-types" }
+apparatus-time = { path = "../apparatus-time" }
+apparatus-crypto = { path = "../apparatus-crypto", features = ["serde"] }
+apparatus-schema = { path = "../apparatus-schema" }
+apparatus-store = { path = "../apparatus-store" }
+apparatus-artifacts = { path = "../apparatus-artifacts" }
+apparatus-ledger = { path = "../apparatus-ledger" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

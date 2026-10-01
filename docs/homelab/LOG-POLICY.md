@@ -71,3 +71,66 @@ What that means:
 - **Keep every other family**, at the stock `level: "info"`.
 - **Do not change** `run/backup`, the checkpoint interval, or `state/`.
 - The change and its five-minute proof are below (Part 2).
+
+## 5. Long-run config (Part 2): the change and its five-minute proof
+
+**What changed:** Aparatus `scripts/ic-up.sh` (commit `bd24866`).
+
+- Each start renders `.ic-local/replica.active.json5` from the stock `replica.json5`. In the rendered file one line changes:
+
+  ```
+  -        exporter: "log",
+  +        exporter: { file: "<IC_DIR>/run/metrics-at-shutdown.prom" },
+  ```
+
+- The replica then writes **no metrics to `replica.log`**. It dumps them once, on shutdown, to `run/metrics-at-shutdown.prom`. This run produced 913 387 bytes there, with 552 `# HELP` series.
+- **Debug flag:** `IC_METRICS_LOG=1 scripts/ic-up.sh` restores the stock `exporter: "log"` for that run only. **Off by default.**
+- **Unchanged:**
+  - log level `info`;
+  - every other line family;
+  - `run/backup` and its hourly purge;
+  - the checkpoint interval;
+  - `state/`.
+
+**The run:** 2026-10-01, 18:55:52 → 19:00:46 UTC, same state as `STATE-GROWTH.md` (18 canisters). Read-only sampling with `stat`, `du`, `ps`, `/api/v2/status` and the ic-agent status read.
+
+| Sample | `replica.log` bytes | lines | `/api/v2/status` | health | certified height | RSS kB |
+|---|---|---|---|---|---|---|
+| before start | 93 463 834 | 1 093 283 | — | — | — | — |
+| **start** (18:55:52) | **93 474 939** | 1 093 324 | 200 | healthy | **5 346** | 89 656 |
+| 1 min | 93 477 468 | 1 093 334 | 200 | healthy | 5 472 | 148 396 |
+| 2 min | 93 485 886 | 1 093 364 | 200 | healthy | 5 612 | 158 296 |
+| 3 min | 93 486 506 | 1 093 366 | 200 | healthy | 5 751 | 158 720 |
+| 4 min | 93 487 126 | 1 093 368 | 200 | healthy | 5 891 | 159 984 |
+| **5 min** (19:00:46) | **93 495 741** | 1 093 399 | 200 | healthy | **6 026** | 168 472 |
+
+**Log growth, start to 5 min:**
+
+| | Before (exporter `log`, `STATE-GROWTH.md`) | After (exporter `file`) |
+|---|---|---|
+| Bytes in 5 min | 8 484 342 | **20 802** |
+| Rate | ≈ 28.8 kB/s | ≈ 71 B/s |
+| Share of the 9 MB measured before | — | **0.24%** |
+
+- With the shutdown lines, the run wrote **78 lines, 21 603 bytes**. None of them are metric lines.
+- What still writes, by crate:
+
+  | Crate | Level | Lines |
+  |---|---|---|
+  | `ic_consensus_dkg/dkg_key_manager` | INFO | 26 |
+  | `ic_state_manager` (checkpoint, tip) | INFO | 24 |
+  | `ic_query_stats/payload_builder` | WARN | 11 |
+  | `ic_state_layout` | INFO | 4 |
+  | `ic_http_endpoints_public` | INFO | 4 |
+  | `ic_consensus` (`batch_delivery`, `notary`) | INFO/WARN | 4 |
+  | start and stop lines | — | 5 |
+
+  These are exactly the families §2 keeps.
+- **The certified height kept rising** (5 346 → 6 026), and `/api/v2/status` answered 200 at every sample.
+
+**`run/backup` (not changed by us) moved on its own.**
+- The replica's own purge ran soon after start: 10 539 519 bytes at start, 3 406 982 at 1 min. Files older than `retention_time_secs: 3600` went.
+- It then climbed again, to 4 039 008 bytes at 5 min.
+- This is the replica's retention working. **A five-minute run does not show a plateau**, and none is claimed.
+
+`run/` went from 137 252 159 bytes at start to 130 772 599 at 5 min. The drop is the purge, not the log.

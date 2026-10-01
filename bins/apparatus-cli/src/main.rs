@@ -327,6 +327,10 @@ enum Rws {
         /// Local advisory feed file. A match writes Advice; nothing is applied.
         #[arg(long)]
         advisory_feed: Option<PathBuf>,
+        /// Also query OSV live (api.osv.dev; includes the RustSec database). A match writes
+        /// Advice naming the feed and the advisory id; nothing is applied.
+        #[arg(long)]
+        osv: bool,
         #[command(flatten)]
         signing: Signing,
     },
@@ -503,6 +507,7 @@ fn rws(root: &Path, cmd: Rws) -> Result<ExitCode> {
             reason,
             registry_fixture,
             advisory_feed,
+            osv,
             signing,
         } => {
             if wait_days != apparatus_types::quarantine::DEFAULT_WAIT_DAYS && reason.is_none() {
@@ -527,10 +532,15 @@ fn rws(root: &Path, cmd: Rws) -> Result<ExitCode> {
                 None => apparatus_quarantine::Registry::online()?,
             };
             let observed = registry.observe(&pins);
-            let advisories = match &advisory_feed {
+            let mut advisories = match &advisory_feed {
                 Some(p) => apparatus_quarantine::load_feed(p)?,
                 None => vec![],
             };
+            if osv {
+                let live = apparatus_quarantine::osv_advisories(&pins)?;
+                eprintln!("osv: {} advisories for {} pins", live.len(), pins.len());
+                advisories.extend(live);
+            }
             let req = req(
                 &signing,
                 Op::Quarantine {

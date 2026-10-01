@@ -8,6 +8,7 @@ members = [
     "crates/apparatus-artifacts",
     "crates/apparatus-ledger",
     "crates/apparatus-kernel",
+    "crates/apparatus-ic",
     "bins/apparatus-cli",
     "bins/apparatusd"
 ]

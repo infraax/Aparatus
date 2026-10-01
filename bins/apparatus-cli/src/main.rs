@@ -7,7 +7,7 @@
 //! 1 error/busy/integrity failure, 2 refused by an RWS rule (on the chain).
 
 use anyhow::{Context, Result};
-use apparatus_kernel::api::{ExecOptions, ListWhat, Op, Request, Response};
+use apparatus_kernel::api::{ExecOptions, IcReading, ListWhat, Op, Request, Response};
 use apparatus_kernel::{execute, Kernel};
 use apparatus_types::rws::*;
 use apparatus_types::{ArtifactId, Classification, ObjectId};
@@ -284,6 +284,9 @@ enum Rws {
         #[command(flatten)]
         signing: Signing,
     },
+    /// Local IC replica commands.
+    #[command(subcommand)]
+    Ic(IcCmd),
     /// List tickets.
     Tickets {
         #[arg(long)]
@@ -302,6 +305,19 @@ enum Rws {
     Check,
     /// Import `rws/receipts.jsonl` (or another buffer) into an empty chain, once.
     ImportJsonl { path: PathBuf },
+}
+
+#[derive(Subcommand, Debug)]
+enum IcCmd {
+    /// Read the replica status through ic-agent and record it as a measured event_envelope.
+    /// Replica down: a refusal on the chain (IC-01), exit 2.
+    Status {
+        /// Replica base URL.
+        #[arg(long, default_value = apparatus_ic::DEFAULT_URL)]
+        url: String,
+        #[command(flatten)]
+        signing: Signing,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -776,6 +792,30 @@ fn to_request(cmd: Rws) -> Result<Request> {
                     signature_scheme: scheme,
                     payload_hash: None,
                     cid: None,
+                },
+            )
+        }
+        Rws::Ic(IcCmd::Status { url, signing }) => {
+            let status_url = apparatus_ic::status_url(&url);
+            let reading = match apparatus_ic::status(&url) {
+                Ok(s) => IcReading::Ok {
+                    replica_health_status: s.health,
+                    certified_height: s.certified_height,
+                },
+                // The writer adds "replica unreachable at <url>"; send only the cause.
+                Err(apparatus_ic::IcError::Unreachable { reason, .. }) => {
+                    IcReading::Unreachable { reason }
+                }
+                Err(apparatus_ic::IcError::BadResponse { reason, .. }) => {
+                    IcReading::BadResponse { reason }
+                }
+                Err(e) => return Err(e.into()),
+            };
+            req(
+                &signing,
+                Op::IcStatus {
+                    url: status_url,
+                    reading,
                 },
             )
         }

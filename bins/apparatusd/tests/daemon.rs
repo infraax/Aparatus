@@ -413,3 +413,55 @@ fn event_envelope_advance_over_rpc_and_sealed_refusal() {
     assert!(terminate(daemon).success());
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn ic_status_over_rpc_duplicate_and_refusals() {
+    use apparatus_kernel::api::IcReading;
+    let dir = solo_project("ic");
+    let daemon = start(&dir);
+    let mut c = client(&dir);
+    let url = "http://127.0.0.1:8080/api/v2/status".to_string();
+    let ok = |h: u64| {
+        as_owner(Op::IcStatus {
+            url: url.clone(),
+            reading: IcReading::Ok {
+                replica_health_status: Some("healthy".into()),
+                certified_height: Some(h),
+            },
+        })
+    };
+    let a = c.call(&ok(279)).unwrap();
+    assert_eq!(a.status, Status::Ok, "{a:?}");
+    assert_eq!(a.kind.as_deref(), Some("event_envelope"));
+    let b = c.call(&ok(279)).unwrap();
+    assert_eq!(b.status, Status::Ok);
+    assert!(b.lines.iter().any(|l| l.contains("duplicate_of")), "{b:?}");
+    let d = c.call(&ok(698)).unwrap();
+    assert!(
+        !d.lines.iter().any(|l| l.contains("duplicate_of")),
+        "new height, new CID"
+    );
+
+    let down = c
+        .call(&as_owner(Op::IcStatus {
+            url: url.clone(),
+            reading: IcReading::Unreachable {
+                reason: "connection refused".into(),
+            },
+        }))
+        .unwrap();
+    assert_eq!(down.status, Status::Refused);
+    assert_eq!(down.rule.as_deref(), Some("IC-01"));
+    assert_eq!(down.lines.len(), 1, "the refusal receipt");
+    let bad = c
+        .call(&as_owner(Op::IcStatus {
+            url,
+            reading: IcReading::BadResponse {
+                reason: "not cbor".into(),
+            },
+        }))
+        .unwrap();
+    assert_eq!(bad.rule.as_deref(), Some("IC-02"));
+    assert!(terminate(daemon).success());
+    std::fs::remove_dir_all(dir).ok();
+}

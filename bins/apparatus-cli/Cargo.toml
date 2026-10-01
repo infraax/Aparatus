@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 apparatus-types = { path = "../../crates/apparatus-types" }
 apparatus-kernel = { path = "../../crates/apparatus-kernel" }
+apparatus-ic = { path = "../../crates/apparatus-ic" }
 clap = { workspace = true, features = ["derive"] }
 anyhow.workspace = true
 serde.workspace = true

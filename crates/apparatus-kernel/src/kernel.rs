@@ -531,6 +531,32 @@ impl Kernel {
         Ok(hash)
     }
 
+    /// Refuse an attempt the kernel itself judged impossible (e.g. IC-01: the replica
+    /// could not be read). Recorded on the chain like any schema refusal.
+    pub fn refuse(
+        &mut self,
+        signer: PrincipalId,
+        role: Role,
+        body: Body,
+        rejection: Rejection,
+    ) -> Result<Submit> {
+        let attempted = Payload {
+            rws: RWS_VERSION.into(),
+            subject_id: None,
+            signer,
+            role,
+            authority_ref: None,
+            evidence: vec![],
+            self_certified: self.meta.solo,
+            body,
+        };
+        let recorded = self.record_refusal(&attempted, &rejection)?;
+        Ok(Submit::Refused(Refused {
+            rejection,
+            recorded,
+        }))
+    }
+
     /// Record a refusal as `illegal_transition_rejected` (K-12, B-14, M-11, X-05).
     fn record_refusal(
         &mut self,

@@ -11,7 +11,9 @@
 - **Canonical form stays canonical JSON** (the ledger's X-04 form) for `payload_hash`, `cid` and signing bytes.
   CBOR vs JCS stays open (disagreement 1). CID codec is `raw` (0x55) because the bytes are canonical JSON, not CBOR.
 - **No ingest → event_envelope.** Stays deferred to the M4 ingest pipe.
-- **No replica wiring.** Aparatus has no IC client. Facts a later hook would use are in
+- **No replica wiring** (Stage 0/1). *Superseded 2026-10-01 on owner request:* `rws ic status` is a read-only hook
+  (ic-agent status read → measured `event_envelope`); see `docs/milestones/IC-STATUS.md`. Still no canister, no writes to the replica.
+  Original Stage 0 text: Aparatus has no IC client. Facts a later hook would use are in
   `infraax/NAP-corpus` `docs/ic/HOOKS.md` (replica address, `/api/v2/status`, binary names, checksums).
 
 ## Disagreements: ENVELOP.md vs T6 (ENVELOP.md followed, no third schema)

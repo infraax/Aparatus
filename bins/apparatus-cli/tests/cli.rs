@@ -899,3 +899,69 @@ fn event_envelope_walks_draft_signed_sealed_via_cli() {
     );
     fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn ic_status_records_height_once_and_refuses_when_down() {
+    let dir = tempdir("icstatus");
+    assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    // A local stub answering like a replica status endpoint, fixed height.
+    let url = apparatus_ic::testing::serve_status("healthy", 4242);
+
+    let first = run(&dir, &["rws", "ic", "status", "--url", &url]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let text = stdout(&first);
+    assert!(
+        text.contains("ic status ") && text.contains("healthy certified_height 4242"),
+        "{text}"
+    );
+    let second = run(&dir, &["rws", "ic", "status", "--url", &url]);
+    assert!(second.status.success());
+    assert!(
+        stdout(&second).contains("duplicate_of"),
+        "{}",
+        stdout(&second)
+    );
+
+    let envs = ledger_envelopes(&dir);
+    assert_eq!(envs.len(), 2);
+    let e = &envs[0];
+    assert_eq!(e["provenance"], "measured");
+    assert_eq!(e["evidence_tag"], "B");
+    assert_eq!(e["source"], format!("{url}/api/v2/status"));
+    assert_eq!(e["module"], "apparatus.ic.status");
+    assert_eq!(
+        e["payload"],
+        serde_json::json!({ "certified_height": 4242, "replica_health_status": "healthy" })
+    );
+    assert_eq!(envs[1]["cid"], e["cid"], "same height, one CID");
+    assert_eq!(envs[1]["duplicate_of"], e["event_id"]);
+
+    // Replica down: refusal on the chain, exit 2.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let down = run(
+        &dir,
+        &[
+            "rws",
+            "ic",
+            "status",
+            "--url",
+            &format!("http://127.0.0.1:{port}"),
+        ],
+    );
+    assert_eq!(down.status.code(), Some(2), "{}", stdout(&down));
+    assert!(String::from_utf8_lossy(&down.stderr).contains("REFUSED IC-01: replica unreachable"));
+    assert!(stdout(&down).contains(" event "), "refusal is a receipt");
+
+    let check = run(&dir, &["rws", "check"]);
+    assert!(check.status.success(), "{}", stdout(&check));
+    assert!(stdout(&check).contains("refusals recorded: 1"));
+    fs::remove_dir_all(dir).ok();
+}

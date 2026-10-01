@@ -1107,10 +1107,17 @@ fn write(
                 payload,
                 payload_hash: payload_hash.unwrap_or(hash),
                 cid: cid.unwrap_or(address),
+                duplicate_of: None,
                 lifecycle,
                 signature_scheme,
                 signature: None,
             };
+            // ENV-09: same bytes under another event_id are kept as a reference to the first.
+            env.duplicate_of = k
+                .state
+                .cid_owner(&env.cid)
+                .filter(|owner| *owner != env.event_id)
+                .map(String::from);
             if lifecycle != Lifecycle::Draft && envelope::payload_bytes(&env.payload).is_ok() {
                 let node = k.node_key()?;
                 match signature_scheme {
@@ -1121,7 +1128,10 @@ fn write(
                 }
                 .map_err(|e| anyhow!(e))?;
             }
-            let cid_line = format!("event_envelope {} cid {}", env.event_id, env.cid);
+            let mut cid_line = format!("event_envelope {} cid {}", env.event_id, env.cid);
+            if let Some(owner) = &env.duplicate_of {
+                cid_line.push_str(&format!(" duplicate_of {owner}"));
+            }
             let result = k.submit(signer, role, None, vec![], Body::EventEnvelope(env))?;
             Ok((vec![cid_line], vec![result]))
         }

@@ -374,6 +374,8 @@ pub struct State {
     last_displacement: BTreeMap<ObjectId, usize>,
     /// Latest accepted version of each event_envelope, by `event_id` (ENV-05, ENV-07).
     envelope_events: BTreeMap<String, EventEnvelope>,
+    /// First `event_id` that carried each CID (ENV-09). One content address, one owner.
+    envelope_cids: BTreeMap<String, String>,
 }
 
 /// Rank used for corrections: a corrector must rank at least as high as the
@@ -455,6 +457,11 @@ impl State {
     /// True if an envelope with this `event_id` is on the chain.
     pub fn has_envelope_event(&self, event_id: &str) -> bool {
         self.envelope_events.contains_key(event_id)
+    }
+
+    /// The `event_id` that first carried `cid`, if any.
+    pub fn cid_owner(&self, cid: &str) -> Option<&str> {
+        self.envelope_cids.get(cid).map(String::as_str)
     }
 
     /// The latest accepted version of an event_envelope.
@@ -1258,6 +1265,39 @@ impl State {
     ///   changes nothing but `lifecycle`. `signed` is one-way; `draft` → `sealed` is refused.
     /// - `anchored` is refused statelessly (ENV-08).
     fn check_envelope(&self, e: &EventEnvelope) -> Result<(), Rejection> {
+        self.check_envelope_transition(e)?;
+        self.check_envelope_cid(e)
+    }
+
+    /// ENV-09: one CID, one content object. A second event with the same payload
+    /// bytes is kept as a reference: it must name the first owner in `duplicate_of`.
+    /// An envelope whose CID is new carries no `duplicate_of`.
+    fn check_envelope_cid(&self, e: &EventEnvelope) -> Result<(), Rejection> {
+        let expected = self
+            .envelope_cids
+            .get(&e.cid)
+            .filter(|owner| **owner != e.event_id);
+        match (expected, &e.duplicate_of) {
+            (None, None) => Ok(()),
+            (Some(owner), Some(d)) if d == owner => Ok(()),
+            (Some(owner), _) => Err(Rejection::new(
+                "ENV-09",
+                format!(
+                    "cid {} is already carried by event_id {owner}; set duplicate_of to it",
+                    e.cid
+                ),
+            )),
+            (None, Some(d)) => Err(Rejection::new(
+                "ENV-09",
+                format!(
+                    "duplicate_of {d} given, but cid {} is not on the chain under another event_id",
+                    e.cid
+                ),
+            )),
+        }
+    }
+
+    fn check_envelope_transition(&self, e: &EventEnvelope) -> Result<(), Rejection> {
         let Some(prev) = self.envelope_events.get(&e.event_id) else {
             return Ok(());
         };
@@ -1521,6 +1561,9 @@ impl State {
                 });
             }
             Body::EventEnvelope(e) => {
+                self.envelope_cids
+                    .entry(e.cid.clone())
+                    .or_insert_with(|| e.event_id.clone());
                 self.envelope_events.insert(e.event_id.clone(), e.clone());
             }
             Body::Correction(_) | Body::Review(_) => {}
@@ -2474,6 +2517,7 @@ mod tests {
             payload,
             payload_hash,
             cid,
+            duplicate_of: None,
             lifecycle,
             signature_scheme: SignatureScheme::Ed25519,
             signature: None,
@@ -2599,7 +2643,7 @@ mod tests {
     #[test]
     fn provenance_needs_its_evidence() {
         let mut h = Harness::solo();
-        let mut m = env("m", serde_json::json!({}), Lifecycle::Draft);
+        let mut m = env("m", serde_json::json!({ "p": "m" }), Lifecycle::Draft);
         m.provenance = ProvenanceKind::Measured;
         assert_eq!(put(&mut h, m.clone()).unwrap_err().rule, "ENV-06");
         for tag in [
@@ -2612,9 +2656,15 @@ mod tests {
             let mut ok = m.clone();
             ok.evidence_tag = Some(tag);
             ok.event_id = format!("m-{tag:?}");
+            // Distinct bytes per event: a repeat would be an ENV-09 reference case.
+            ok.payload = serde_json::json!({ "tag": format!("{tag:?}") });
+            let (hash, cid) =
+                crate::envelope::address(&crate::envelope::payload_bytes(&ok.payload).unwrap());
+            ok.payload_hash = hash;
+            ok.cid = cid;
             put(&mut h, ok).unwrap();
         }
-        let mut i = env("i", serde_json::json!({}), Lifecycle::Draft);
+        let mut i = env("i", serde_json::json!({ "p": "i" }), Lifecycle::Draft);
         i.provenance = ProvenanceKind::Inferred;
         assert_eq!(put(&mut h, i.clone()).unwrap_err().rule, "ENV-06");
         i.source_ref = Some("  ".into());
@@ -2622,6 +2672,48 @@ mod tests {
         i.source_ref = Some("model:planner@run-7".into());
         put(&mut h, i).unwrap();
         // stated needs neither.
-        put(&mut h, env("s", serde_json::json!({}), Lifecycle::Draft)).unwrap();
+        put(
+            &mut h,
+            env("s", serde_json::json!({ "p": "s" }), Lifecycle::Draft),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn same_bytes_twice_is_one_cid_and_a_reference() {
+        let mut h = Harness::solo();
+        let key = apparatus_crypto::Ed25519Key::generate().unwrap();
+        let first = signed(
+            env("a", serde_json::json!({ "x": 1 }), Lifecycle::Draft),
+            &key,
+        );
+        put(&mut h, first.clone()).unwrap();
+        assert_eq!(h.state.cid_owner(&first.cid), Some("a"));
+
+        // Same bytes under another event_id without the reference: ENV-09.
+        let bare = signed(
+            env("b", serde_json::json!({ "x": 1 }), Lifecycle::Draft),
+            &key,
+        );
+        assert_eq!(bare.cid, first.cid, "same bytes, same CID");
+        assert_eq!(put(&mut h, bare).unwrap_err().rule, "ENV-09");
+        // Pointing at the wrong owner: ENV-09.
+        let mut wrong = env("b", serde_json::json!({ "x": 1 }), Lifecycle::Draft);
+        wrong.duplicate_of = Some("nobody".into());
+        let wrong = signed(wrong, &key);
+        assert_eq!(put(&mut h, wrong).unwrap_err().rule, "ENV-09");
+        // With duplicate_of = first owner: accepted, still one owner for the CID.
+        let mut reference = env("b", serde_json::json!({ "x": 1 }), Lifecycle::Draft);
+        reference.duplicate_of = Some("a".into());
+        put(&mut h, signed(reference, &key)).unwrap();
+        assert_eq!(h.state.cid_owner(&first.cid), Some("a"));
+        // A reference on a new CID: ENV-09.
+        let mut stray = env("c", serde_json::json!({ "x": 2 }), Lifecycle::Draft);
+        stray.duplicate_of = Some("a".into());
+        assert_eq!(put(&mut h, stray).unwrap_err().rule, "ENV-09");
+        // The same event_id moving through its lifecycle is not a duplicate of itself.
+        let mut sealed = first;
+        sealed.lifecycle = Lifecycle::Sealed;
+        put(&mut h, sealed).unwrap();
     }
 }

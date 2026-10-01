@@ -803,3 +803,27 @@ fn sealed_event_envelope_mutation_is_refused_on_chain() {
     );
     fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn same_payload_twice_is_one_cid_stored_as_reference() {
+    let dir = tempdir("envdup");
+    assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    let a = envelope(&dir, &["--data", r#"{"t":21}"#, "--event-id", "a"]);
+    assert!(a.status.success());
+    // Key order differs; canonical bytes and CID do not.
+    let b = envelope(&dir, &["--data", r#"{ "t" : 21 }"#, "--event-id", "b"]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    assert!(stdout(&b).contains("duplicate_of a"), "{}", stdout(&b));
+
+    let envs = ledger_envelopes(&dir);
+    assert_eq!(envs.len(), 2);
+    assert_eq!(envs[0]["cid"], envs[1]["cid"], "one CID");
+    assert!(envs[0].get("duplicate_of").is_none());
+    assert_eq!(
+        envs[1]["duplicate_of"], "a",
+        "second is a reference to the first"
+    );
+    let check = run(&dir, &["rws", "check"]);
+    assert!(check.status.success(), "{}", stdout(&check));
+    fs::remove_dir_all(dir).ok();
+}

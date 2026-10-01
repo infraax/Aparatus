@@ -201,6 +201,7 @@ mod tests {
             payload,
             payload_hash,
             cid,
+            duplicate_of: None,
             lifecycle: Lifecycle::Draft,
             signature_scheme: SignatureScheme::Ed25519,
             signature: None,

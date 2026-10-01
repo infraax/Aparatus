@@ -638,6 +638,10 @@ pub struct EventEnvelope {
     pub payload_hash: String,
     /// CID v1 (raw, BLAKE3-256, base32 lowercase) of the canonical payload bytes.
     pub cid: String,
+    /// `event_id` of the first envelope that carried this `cid`, when another
+    /// event already did (Stage 1, ENV-09). Set by the writer; in signature scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_of: Option<String>,
     pub lifecycle: Lifecycle,
     pub signature_scheme: SignatureScheme,
     /// Absent only while `lifecycle` is `draft`.
@@ -709,6 +713,7 @@ mod tests {
             payload: serde_json::json!({ "n": 1 }),
             payload_hash: String::new(),
             cid: String::new(),
+            duplicate_of: None,
             lifecycle: Lifecycle::Draft,
             signature_scheme: SignatureScheme::MlDsa65Stub,
             signature: None,

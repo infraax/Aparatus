@@ -253,6 +253,13 @@ pub enum Op {
         #[serde(default)]
         cid: Option<String>,
     },
+    /// Move an existing event_envelope to `to` (Stage 1). The writer copies the
+    /// latest stored version, sets `lifecycle`, and signs when it leaves `draft`.
+    /// The schema rules (ENV-04..08) decide; a refusal is recorded on the chain.
+    EventEnvelopeAdvance {
+        event_id: String,
+        to: Lifecycle,
+    },
     /// Test hook: panics inside the handler when the executor allows it.
     DebugPanic,
 }
@@ -1134,6 +1141,30 @@ fn write(
             }
             let result = k.submit(signer, role, None, vec![], Body::EventEnvelope(env))?;
             Ok((vec![cid_line], vec![result]))
+        }
+        Op::EventEnvelopeAdvance { event_id, to } => {
+            let role = k.pick_role(signer, role, &ANY_ROLE);
+            let Some(mut env) = k.state.event_envelope(&event_id).cloned() else {
+                bail!("no event_envelope with event_id {event_id} on this chain");
+            };
+            let from = env.lifecycle;
+            env.lifecycle = to;
+            if to == Lifecycle::Draft {
+                env.signature = None;
+            } else if from == Lifecycle::Draft {
+                let node = k.node_key()?;
+                match env.signature_scheme {
+                    SignatureScheme::Ed25519 => envelope::sign(&mut env, &node),
+                    SignatureScheme::MlDsa65Stub => {
+                        envelope::sign(&mut env, &MlDsa65Stub::new(node.public_key()))
+                    }
+                }
+                .map_err(|e| anyhow!(e))?;
+            }
+            let name = |l: Lifecycle| format!("{l:?}").to_lowercase();
+            let line = format!("event_envelope {event_id} {} -> {}", name(from), name(to));
+            let result = k.submit(signer, role, None, vec![], Body::EventEnvelope(env))?;
+            Ok((vec![line], vec![result]))
         }
         Op::Head
         | Op::Check

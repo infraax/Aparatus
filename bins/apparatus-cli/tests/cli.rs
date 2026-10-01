@@ -827,3 +827,75 @@ fn same_payload_twice_is_one_cid_stored_as_reference() {
     assert!(check.status.success(), "{}", stdout(&check));
     fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn event_envelope_walks_draft_signed_sealed_via_cli() {
+    let dir = tempdir("envwalk");
+    assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    let to = |id: &str, state: &str| {
+        run(
+            &dir,
+            &["rws", "event-envelope", "--event-id", id, "--to", state],
+        )
+    };
+    let refused = |o: &Output, rule: &str| {
+        assert_eq!(o.status.code(), Some(2), "{rule}: {}", stdout(o));
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains(&format!("REFUSED {rule}")),
+            "{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        assert!(stdout(o).contains(" event "), "refusal is a receipt");
+    };
+
+    assert!(envelope(
+        &dir,
+        &[
+            "--data",
+            r#"{"t":1}"#,
+            "--event-id",
+            "w1",
+            "--lifecycle",
+            "draft"
+        ]
+    )
+    .status
+    .success());
+    // draft → sealed skips signing: ENV-05.
+    refused(&to("w1", "sealed"), "ENV-05");
+    // draft → signed: the writer signs; the receipt verifies.
+    let s = to("w1", "signed");
+    assert!(s.status.success(), "{}", String::from_utf8_lossy(&s.stderr));
+    assert!(stdout(&s).starts_with("event_envelope w1 draft -> signed"));
+    // signed → draft: one-way, ENV-05.
+    refused(&to("w1", "draft"), "ENV-05");
+    // signed → sealed.
+    let s = to("w1", "sealed");
+    assert!(s.status.success(), "{}", String::from_utf8_lossy(&s.stderr));
+    // sealed → anything: ENV-07; sealed → anchored: ENV-08 (Stage 3).
+    refused(&to("w1", "signed"), "ENV-07");
+    refused(&to("w1", "anchored"), "ENV-08");
+    // Unknown event_id: an error, not a receipt.
+    assert_eq!(to("missing", "signed").status.code(), Some(1));
+
+    let envs = ledger_envelopes(&dir);
+    let states: Vec<&str> = envs
+        .iter()
+        .map(|e| e["lifecycle"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["draft", "signed", "sealed"]);
+    assert!(envs[0]["signature"].is_null());
+    assert_eq!(
+        envs[1]["signature"], envs[2]["signature"],
+        "sealing keeps the signature"
+    );
+    assert_eq!(envs[0]["cid"], envs[2]["cid"]);
+    let check = run(&dir, &["rws", "check"]);
+    assert!(check.status.success(), "{}", stdout(&check));
+    assert!(
+        stdout(&check).contains("refusals recorded: 4"),
+        "{}",
+        stdout(&check)
+    );
+    fs::remove_dir_all(dir).ok();
+}

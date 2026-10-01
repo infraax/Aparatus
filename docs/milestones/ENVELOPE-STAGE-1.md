@@ -36,6 +36,49 @@ e.g. two sensors reporting the same reading. Refusing would drop the second even
 gives one content object. Nothing is dropped silently. The same `event_id` moving through its lifecycle is not a duplicate of itself.
 The payload stays inline in the reference receipt (≤ 4 KB); moving bytes to CAS is still deferred.
 
+## Commands: walk draft → signed → sealed
+
+```bash
+apparatus rws event-envelope --data '{"temp_c":21}' --source sensor:bme280 --module dexos.climate \
+  --provenance measured --evidence-tag A --event-id ev1 --lifecycle draft
+apparatus rws event-envelope --event-id ev1 --to signed     # writer signs with .apparatus/keys/ed25519.seed
+apparatus rws event-envelope --event-id ev1 --to sealed     # same envelope and signature, lifecycle sealed
+apparatus rws check                                         # replays and re-verifies every signature
+```
+
+Output of a step: `event_envelope ev1 draft -> signed` then `<receipt-id> event_envelope <hash>`.
+`--to` reuses the latest stored version of `--event-id`; it cannot be combined with `--data`, `--payload`, `--source`,
+`--module`, `--provenance` or `--lifecycle`. RPC: `{"op":"event_envelope_advance","event_id":"ev1","to":"sealed"}`.
+
+Other forms:
+
+```bash
+# inferred needs a source reference; stated needs nothing extra
+apparatus rws event-envelope --data '{"plan":"x"}' --source agent:planner --module dexos.plan \
+  --provenance inferred --source-ref model:planner@run-7
+# same bytes again under another event_id → accepted as a reference
+apparatus rws event-envelope --data '{"temp_c":21}' --source sensor:b --module dexos.climate \
+  --provenance measured --evidence-tag A --event-id ev2      # prints "… duplicate_of ev1"
+```
+
+## Refusal cases (exit 2, `illegal_transition_rejected` receipt, `REFUSED <rule>` on stderr)
+
+| Command (after the walk above, `ev1` sealed) | Rule |
+|---|---|
+| `rws event-envelope --event-id ev1 --to signed` | ENV-07 sealed never changes |
+| `rws event-envelope --event-id ev1 --data '{"temp_c":22}' --source s --module m --provenance stated` | ENV-07 |
+| `rws event-envelope --event-id ev1 --to anchored` | ENV-08 Stage 3 |
+| draft `d1`, then `rws event-envelope --event-id d1 --to sealed` | ENV-05 sign before sealing |
+| signed `s1`, then `rws event-envelope --event-id s1 --to draft` | ENV-05 signed is one-way |
+| `… --provenance measured` without `--evidence-tag` | ENV-06 |
+| `… --provenance inferred` without `--source-ref` | ENV-06 |
+
+ENV-09 cannot be triggered through the CLI or RPC: the writer always sets `duplicate_of`. It guards receipts that
+bypass the writer (`rws import-jsonl`, replay of a chain on open) and is covered by the schema test.
+
+Not refusals: `--to` on an unknown `event_id` is an error (exit 1, no receipt). A clap usage error (bad flag value,
+`--to` with `--data`) also exits 2 but writes no receipt and prints no `REFUSED` line. This is the existing CLI behaviour.
+
 ## Not built
 
 - ML-DSA-65 / hybrid (#14); Bitcoin anchoring (#15).

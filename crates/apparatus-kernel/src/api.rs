@@ -6,7 +6,8 @@
 
 use crate::kernel::{buffer_path, line, BatchPart, Kernel, Submit, DAY_MS};
 use anyhow::{anyhow, bail, Context, Result};
-use apparatus_crypto::Sha256Digest;
+use apparatus_crypto::{MlDsa65Stub, Sha256Digest, SigningKey};
+use apparatus_schema::envelope;
 use apparatus_schema::rws::{role_rank, ItemState};
 use apparatus_types::rws::*;
 use apparatus_types::{ArtifactId, Classification, ObjectId, PrincipalId};
@@ -221,6 +222,31 @@ pub enum Op {
         #[serde(default)]
         reason: Option<String>,
     },
+    /// Record an event envelope (NAP-corpus #12, Stage 0). The writer computes
+    /// `payload_hash`, `cid` and the signature unless the client states them;
+    /// stated values are checked, and a bad envelope is a refusal on the chain.
+    EventEnvelope {
+        payload: serde_json::Value,
+        source: String,
+        module: String,
+        provenance: ProvenanceKind,
+        /// Default: a fresh UUIDv7.
+        #[serde(default)]
+        event_id: Option<String>,
+        /// Seconds since the epoch. Default: now.
+        #[serde(default)]
+        unix_timestamp: Option<u64>,
+        /// Default: `signed`. `draft` is stored unsigned; `sealed`/`anchored` are
+        /// stored as declared (not enforced until Stage 1).
+        #[serde(default)]
+        lifecycle: Option<Lifecycle>,
+        #[serde(default = "ed25519")]
+        signature_scheme: SignatureScheme,
+        #[serde(default)]
+        payload_hash: Option<String>,
+        #[serde(default)]
+        cid: Option<String>,
+    },
     /// Test hook: panics inside the handler when the executor allows it.
     DebugPanic,
 }
@@ -245,6 +271,9 @@ fn full() -> CarryOver {
 }
 fn event_str() -> String {
     "event".into()
+}
+fn ed25519() -> SignatureScheme {
+    SignatureScheme::Ed25519
 }
 
 impl Op {
@@ -1040,6 +1069,51 @@ fn write(
                     ticket: None,
                 }),
             )?)
+        }
+        Op::EventEnvelope {
+            payload,
+            source,
+            module,
+            provenance,
+            event_id,
+            unix_timestamp,
+            lifecycle,
+            signature_scheme,
+            payload_hash,
+            cid,
+        } => {
+            let role = k.pick_role(signer, role, &ANY_ROLE);
+            // Unencodable payloads get empty addresses; ENV-02 refuses them on the chain.
+            let (hash, address) = envelope::payload_bytes(&payload)
+                .map(|b| envelope::address(&b))
+                .unwrap_or_default();
+            let lifecycle = lifecycle.unwrap_or(Lifecycle::Signed);
+            let mut env = EventEnvelope {
+                event_id: event_id.unwrap_or_else(|| ObjectId::new_v7().to_string()),
+                unix_timestamp: unix_timestamp.unwrap_or(k.now() / 1000),
+                source,
+                module,
+                provenance,
+                payload,
+                payload_hash: payload_hash.unwrap_or(hash),
+                cid: cid.unwrap_or(address),
+                lifecycle,
+                signature_scheme,
+                signature: None,
+            };
+            if lifecycle != Lifecycle::Draft && envelope::payload_bytes(&env.payload).is_ok() {
+                let node = k.node_key()?;
+                match signature_scheme {
+                    SignatureScheme::Ed25519 => envelope::sign(&mut env, &node),
+                    SignatureScheme::MlDsa65Stub => {
+                        envelope::sign(&mut env, &MlDsa65Stub::new(node.public_key()))
+                    }
+                }
+                .map_err(|e| anyhow!(e))?;
+            }
+            let cid_line = format!("event_envelope {} cid {}", env.event_id, env.cid);
+            let result = k.submit(signer, role, None, vec![], Body::EventEnvelope(env))?;
+            Ok((vec![cid_line], vec![result]))
         }
         Op::Head
         | Op::Check

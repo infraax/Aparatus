@@ -47,7 +47,7 @@ fn install_signal_handlers() {
 }
 
 enum Job {
-    Request(Request, SyncSender<Response>),
+    Request(Box<Request>, SyncSender<Response>),
     Stop,
 }
 
@@ -147,7 +147,7 @@ fn writer_loop(mut kernel: Kernel, rx: Receiver<Job>, allow_debug_panic: bool) {
     };
     while let Ok(job) = rx.recv() {
         let (req, reply) = match job {
-            Job::Request(req, reply) => (req, reply),
+            Job::Request(req, reply) => (*req, reply),
             Job::Stop => break,
         };
         let op_name = req.op.name();
@@ -252,7 +252,7 @@ fn serve(stream: UnixStream, tx: SyncSender<Job>, enqueue: Duration, reply_wait:
 
 fn submit(tx: &SyncSender<Job>, req: Request, enqueue: Duration, reply_wait: Duration) -> Response {
     let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-    let mut job = Job::Request(req, reply_tx);
+    let mut job = Job::Request(Box::new(req), reply_tx);
     let deadline = Instant::now() + enqueue;
     loop {
         match tx.try_send(job) {

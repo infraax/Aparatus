@@ -6,6 +6,7 @@
 use apparatus_types::ObjectHeader;
 use thiserror::Error;
 
+pub mod envelope;
 pub mod rws;
 
 /// Errors that can occur during domain validation.

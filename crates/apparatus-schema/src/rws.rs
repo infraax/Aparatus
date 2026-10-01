@@ -261,6 +261,7 @@ impl Validate for Payload {
                     }
                 }
             }
+            Body::EventEnvelope(e) => crate::envelope::validate(e)?,
             Body::Correction(c) => {
                 if c.reason.trim().is_empty() {
                     return Err(rule("C-06", "correction needs a reason"));
@@ -371,6 +372,8 @@ pub struct State {
     origin_role: BTreeMap<ObjectId, Role>,
     /// Chain position of the latest displacement event per subject (K-09).
     last_displacement: BTreeMap<ObjectId, usize>,
+    /// `event_id`s of envelope receipts (ENV-05).
+    envelope_events: BTreeSet<String>,
 }
 
 /// Rank used for corrections: a corrector must rank at least as high as the
@@ -447,6 +450,11 @@ impl State {
 
     pub fn artifacts(&self) -> impl Iterator<Item = (&ObjectId, &ArtifactInfo)> {
         self.artifacts.iter()
+    }
+
+    /// True if an envelope with this `event_id` is on the chain.
+    pub fn has_envelope_event(&self, event_id: &str) -> bool {
+        self.envelope_events.contains(event_id)
     }
 
     pub fn has_digest(&self, digest: &str) -> bool {
@@ -620,6 +628,7 @@ impl State {
             Body::Event(e) => self.check_event(payload, e),
             Body::Correction(c) => self.check_correction(payload, c),
             Body::Review(r) => self.check_review(payload, r),
+            Body::EventEnvelope(e) => self.check_envelope(e),
         }
     }
 
@@ -1235,6 +1244,18 @@ impl State {
         self.check_refs(&e.refs, "F-01")
     }
 
+    /// ENV-05: an envelope's `event_id` is unique on the chain (append-only;
+    /// a correction is a new event, ENVELOP.md §1).
+    fn check_envelope(&self, e: &EventEnvelope) -> Result<(), Rejection> {
+        if self.envelope_events.contains(&e.event_id) {
+            return Err(Rejection::new(
+                "ENV-05",
+                format!("event_id {} is already on the chain", e.event_id),
+            ));
+        }
+        Ok(())
+    }
+
     fn check_correction(&self, payload: &Payload, c: &Correction) -> Result<(), Rejection> {
         if !self.exists(c.corrects) {
             return Err(Rejection::new("C-06", "corrected object does not exist"));
@@ -1464,6 +1485,9 @@ impl State {
                     detail: e.detail.clone(),
                     ticket: e.ticket.clone(),
                 });
+            }
+            Body::EventEnvelope(e) => {
+                self.envelope_events.insert(e.event_id.clone());
             }
             Body::Correction(_) | Body::Review(_) => {}
         }

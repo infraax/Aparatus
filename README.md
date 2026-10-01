@@ -11,6 +11,7 @@ One project = one append-only, hash-chained receipt ledger + a content-addressed
 | M1 | Kernel: typed payloads (11 kinds), canonical hash, file ledger + CAS, `apparatus rws` CLI | `docs/milestones/M1.md` |
 | M2 | Keep agreements (K-01), solo mandate_holder, correction/review, writer lock | `docs/milestones/M2.md` |
 | M3 | `apparatusd`: JSONL RPC on a Unix socket, one writer actor, tickets | `docs/milestones/M3.md` |
+| Envelope 0 | `event_envelope` receipt kind: provenance + lifecycle enums, CID v1/BLAKE3, Ed25519 + ML-DSA-65 stub (NAP-corpus #12) | `docs/milestones/ENVELOPE-STAGE-0.md` |
 | M4 | **Next** — ingest drop-pipeline, health signals, replica backup, hook trait | `docs/handoff/M4-HANDOFF.md` |
 
 Open items per milestone: `docs/notes/M*-DEFERRED.md`.
@@ -23,6 +24,7 @@ apparatus rws init --solo                 # in a project directory
 apparatus rws policy agreement --asset '*'
 apparatus rws ingest ./README.md --purpose corpus --tag C
 apparatus rws queue keep --asset demo
+apparatus rws event-envelope --data '{"n":1}' --source me --module dexos.demo --provenance stated
 apparatus rws check
 apparatusd --project .                    # optional: always-on daemon; the CLI then talks to it
 ```
@@ -32,7 +34,7 @@ apparatusd --project .                    # optional: always-on daemon; the CLI 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                    # 54 tests at M3
+cargo test --workspace                    # 71 tests at Envelope Stage 0
 just daemon .                             # restart loop around apparatusd
 ```
 
@@ -42,7 +44,7 @@ just daemon .                             # restart loop around apparatusd
 crates/
   apparatus-types       ids, headers, RWS 2.0 vocabulary and payloads
   apparatus-time        clocks
-  apparatus-crypto      SHA-256 digests
+  apparatus-crypto      SHA-256, canonical JSON, BLAKE3/CID v1, signing keys (Ed25519, ML-DSA-65 stub)
   apparatus-schema      payload validation + chain State (all RWS rules)
   apparatus-store       store traits and errors
   apparatus-artifacts   write-once filesystem CAS
@@ -59,4 +61,4 @@ docs/
   background/           Design.md and Dutch Way (background only; RWS 2.0 overrules)
 ```
 
-Project data lives in `<project>/.apparatus/` (`project.json`, `ledger.jsonl`, `HEAD`, `cas/`, `LOCK`, `apparatusd.sock`).
+Project data lives in `<project>/.apparatus/` (`project.json`, `ledger.jsonl`, `HEAD`, `cas/`, `keys/`, `LOCK`, `apparatusd.sock`).

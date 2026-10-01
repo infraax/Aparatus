@@ -10,7 +10,8 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use apparatus_artifacts::FsArtifactStore;
-use apparatus_crypto::Sha256Digest;
+use apparatus_crypto::signing::{from_hex, to_hex};
+use apparatus_crypto::{Ed25519Key, Sha256Digest};
 use apparatus_ledger::{ChainEntry, FileLedger, LedgerLock, Receipt, LOCK_TIMEOUT};
 use apparatus_schema::rws::{decode_payload, Rejection, State};
 use apparatus_time::{Clock, SystemClock};
@@ -21,6 +22,7 @@ use apparatus_types::{
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const DAY_MS: u64 = 86_400_000;
@@ -572,6 +574,37 @@ impl Kernel {
         }
         let hash = self.append(header, &payload)?;
         Ok(Some((id, hash)))
+    }
+
+    /// The node's Ed25519 envelope key, `.apparatus/keys/ed25519.seed` (hex,
+    /// mode 0600). Created on first use. Only the writer holding LOCK reads it.
+    pub fn node_key(&self) -> Result<Ed25519Key> {
+        let dir = apparatus_dir(&self.root).join("keys");
+        let path = dir.join("ed25519.seed");
+        if path.exists() {
+            let text =
+                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            let seed: [u8; 32] = from_hex(text.trim())
+                .and_then(|b| b.try_into().ok())
+                .ok_or_else(|| anyhow!("{} is not a 32-byte hex seed", path.display()))?;
+            return Ok(Ed25519Key::from_seed(&seed));
+        }
+        let key = Ed25519Key::generate().map_err(|e| anyhow!("no OS randomness: {e}"))?;
+        fs::create_dir_all(&dir)?;
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            opts.mode(0o600);
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+        }
+        let mut file = opts
+            .open(&path)
+            .with_context(|| format!("creating {}", path.display()))?;
+        file.write_all(format!("{}\n", to_hex(&key.seed())).as_bytes())?;
+        file.sync_all()?;
+        Ok(key)
     }
 
     /// Find a receipt by id.

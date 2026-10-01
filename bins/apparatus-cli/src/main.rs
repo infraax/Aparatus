@@ -53,6 +53,12 @@ enum McpCmd {
         /// Local replica.
         #[arg(long, default_value = apparatus_ic::DEFAULT_URL)]
         url: String,
+        /// The access-keys vault canister id (for `access_keys_describe`).
+        #[arg(long)]
+        vault: Option<String>,
+        /// The node-status canister id (for `node_status`).
+        #[arg(long)]
+        node_status: Option<String>,
     },
 }
 
@@ -444,7 +450,13 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
-        Commands::Mcp(McpCmd::Serve { gate, key, url }) => {
+        Commands::Mcp(McpCmd::Serve {
+            gate,
+            key,
+            url,
+            vault,
+            node_status,
+        }) => {
             let key = if key.is_absolute() {
                 key
             } else {
@@ -452,12 +464,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
             };
             let g = mcp::CanisterGate {
                 url: url.clone(),
-                key,
+                key: key.clone(),
                 canister: gate,
             };
             let ctx = mcp::Ctx {
                 project: cli.project.clone(),
                 replica_url: url,
+                vault,
+                node_status,
+                key: Some(key),
             };
             mcp::serve(&g, &ctx)?;
             Ok(ExitCode::SUCCESS)

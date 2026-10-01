@@ -148,6 +148,54 @@ pub fn key_principal(path: &std::path::Path) -> Result<(String, bool), String> {
     Ok((principal.to_text(), created))
 }
 
+/// Query a canister method that returns one `Text`, with no argument or one `Text` argument.
+/// Signed with the raw Ed25519 seed in `key` when given (for methods that check the caller),
+/// anonymous otherwise. Local replica only: the root key is fetched from the replica itself.
+pub fn query_text(
+    base: &str,
+    key: Option<&std::path::Path>,
+    canister: &str,
+    method: &str,
+    text_arg: Option<&str>,
+) -> Result<String, IcError> {
+    use candid::{Decode, Encode};
+    use ic_agent::identity::BasicIdentity;
+    let bad = |reason: String| IcError::BadResponse {
+        url: base.to_string(),
+        reason,
+    };
+    let id = Principal::from_text(canister).map_err(|e| bad(format!("canister id: {e}")))?;
+    let client = reqwest::Client::builder()
+        .timeout(TIMEOUT * 6)
+        .build()
+        .map_err(|e| bad(e.to_string()))?;
+    let mut builder = Agent::builder().with_url(base).with_http_client(client);
+    if let Some(k) = key {
+        let seed: [u8; 32] = std::fs::read(k)
+            .map_err(|e| bad(format!("reading {}: {e}", k.display())))?
+            .try_into()
+            .map_err(|_| bad(format!("{} is not a 32-byte key", k.display())))?;
+        builder = builder.with_identity(BasicIdentity::from_raw_key(&seed));
+    }
+    let agent = builder.build().map_err(|e| bad(e.to_string()))?;
+    let arg = match text_arg {
+        Some(t) => Encode!(&t.to_string()),
+        None => Encode!(),
+    }
+    .map_err(|e| bad(format!("candid: {e}")))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| bad(format!("tokio runtime: {e}")))?;
+    let out = runtime
+        .block_on(async {
+            agent.fetch_root_key().await?;
+            agent.query(&id, method).with_arg(arg).call().await
+        })
+        .map_err(|e| classify(base, e))?;
+    Decode!(&out, String).map_err(|e| bad(format!("candid: {e}")))
+}
+
 /// Client for the `mcp-gate` canister (NAP-corpus `docs/ic/canisters/mcp-gate`). The MCP
 /// bridge asks it before every tool call; the canister records the decision as an Event.
 pub mod gate {

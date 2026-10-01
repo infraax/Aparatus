@@ -1,0 +1,22 @@
+[package]
+name = "apparatus-cli"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "apparatus"
+path = "src/main.rs"
+
+[dependencies]
+apparatus-types = { path = "../../crates/apparatus-types" }
+apparatus-kernel = { path = "../../crates/apparatus-kernel" }
+apparatus-ic = { path = "../../crates/apparatus-ic" }
+apparatus-quarantine = { path = "../../crates/apparatus-quarantine" }
+clap = { workspace = true, features = ["derive"] }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+time.workspace = true

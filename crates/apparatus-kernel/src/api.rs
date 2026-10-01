@@ -9,6 +9,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use apparatus_crypto::{MlDsa65Stub, Sha256Digest, SigningKey};
 use apparatus_schema::envelope;
 use apparatus_schema::rws::{role_rank, ItemState};
+use apparatus_types::quarantine::{AdvisoryRecord, PinObservation, DEFAULT_WAIT_DAYS};
 use apparatus_types::rws::*;
 use apparatus_types::{ArtifactId, Classification, ObjectId, PrincipalId};
 use serde::{Deserialize, Serialize};
@@ -269,9 +270,30 @@ pub enum Op {
         url: String,
         reading: IcReading,
     },
+    /// Package quarantine (Aparatus #21). The client parsed the lockfiles and looked
+    /// the pins up; the writer records each pin once per state (`waiting` / `adopted`),
+    /// refuses hash mismatches (Q-01) and unverifiable pins (Q-02), and turns feed
+    /// advisories into Advice. It never touches a lockfile.
+    Quarantine {
+        #[serde(default = "default_wait")]
+        wait_days: u64,
+        /// Required when `wait_days` is not the default; the override is recorded.
+        #[serde(default)]
+        override_reason: Option<String>,
+        pins: Vec<PinObservation>,
+        #[serde(default)]
+        advisories: Vec<AdvisoryRecord>,
+    },
     /// Test hook: panics inside the handler when the executor allows it.
     DebugPanic,
 }
+
+fn default_wait() -> u64 {
+    DEFAULT_WAIT_DAYS
+}
+
+/// Module name on quarantine envelopes.
+pub const QUARANTINE_MODULE: &str = "apparatus.quarantine";
 
 /// What the client got from the replica status endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -468,6 +490,25 @@ fn execute_inner(k: &mut Kernel, req: Request, opts: ExecOptions) -> Result<Resp
         }
     }
     let signer = k.principal(Some(&name)).0;
+    if let Op::Quarantine {
+        wait_days,
+        override_reason,
+        pins,
+        advisories,
+    } = req.op
+    {
+        return quarantine(
+            k,
+            signer,
+            &name,
+            req.role,
+            req.producer_kind,
+            wait_days,
+            override_reason,
+            pins,
+            advisories,
+        );
+    }
     let (mut extra, results) = write(k, signer, &name, req.role, req.producer_kind, req.op)?;
     Ok(finish(&mut extra, results))
 }
@@ -1267,6 +1308,7 @@ fn write(
             )?;
             Ok((vec![], vec![result]))
         }
+        Op::Quarantine { .. } => bail!("quarantine is handled by api::quarantine"),
         Op::Head
         | Op::Check
         | Op::Show { .. }
@@ -1274,6 +1316,305 @@ fn write(
         | Op::Tickets { .. }
         | Op::DebugPanic => bail!("not a write operation"),
     }
+}
+
+/// Receipt ids of event_envelopes whose `event_id` starts with `prefix`.
+fn envelope_receipts(k: &Kernel, prefix: &str) -> Vec<ObjectId> {
+    k.entries
+        .iter()
+        .filter(|e| {
+            e.receipt
+                .operation_payload
+                .get("kind")
+                .and_then(|v| v.as_str())
+                == Some("event_envelope")
+                && e.receipt
+                    .operation_payload
+                    .get("event_id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|id| id.starts_with(prefix))
+        })
+        .map(|e| e.receipt.header.id)
+        .collect()
+}
+
+/// `rws quarantine`: record pins, refuse bad hashes, turn advisories into Advice.
+#[allow(clippy::too_many_arguments)]
+fn quarantine(
+    k: &mut Kernel,
+    signer: PrincipalId,
+    signer_name: &str,
+    role: Option<Role>,
+    producer_kind: Option<PrincipalKind>,
+    wait_days: u64,
+    override_reason: Option<String>,
+    pins: Vec<PinObservation>,
+    advisories: Vec<AdvisoryRecord>,
+) -> Result<Response> {
+    let mut lines = vec![];
+    let mut refusals: Vec<(&'static str, String)> = vec![];
+    let (mut adopted, mut waiting, mut skipped, mut advised) = (0, 0, 0, 0);
+    let push =
+        |lines: &mut Vec<String>, refusals: &mut Vec<(&'static str, String)>, s: Submit| match s {
+            Submit::Accepted { id, kind, hash } => lines.push(line(id, kind, &hash)),
+            Submit::Refused(r) => {
+                if let Some((id, hash)) = r.recorded {
+                    lines.push(line(id, "event", &hash));
+                }
+                lines.push(format!("refused {}", r.rejection));
+                refusals.push((r.rejection.rule, r.rejection.reason));
+            }
+        };
+    let envelope =
+        |event_id: String, source: String, provenance, evidence_tag, payload| Op::EventEnvelope {
+            payload,
+            source,
+            module: QUARANTINE_MODULE.into(),
+            provenance,
+            evidence_tag,
+            source_ref: None,
+            event_id: Some(event_id),
+            unix_timestamp: None,
+            lifecycle: None,
+            signature_scheme: SignatureScheme::Ed25519,
+            payload_hash: None,
+            cid: None,
+        };
+
+    // The wait is 5 days unless an override is given, and an override is a receipt.
+    if wait_days != DEFAULT_WAIT_DAYS {
+        let Some(reason) = override_reason.filter(|r| !r.trim().is_empty()) else {
+            return Ok(Response::error(format!(
+                "wait_days {wait_days} differs from the default {DEFAULT_WAIT_DAYS}; give a reason (the override is recorded)"
+            )));
+        };
+        let op = envelope(
+            format!("quarantine:override:{}", ObjectId::new_v7()),
+            format!("principal:{signer_name}"),
+            ProvenanceKind::Stated,
+            None,
+            serde_json::json!({
+                "wait_days": wait_days,
+                "default_wait_days": DEFAULT_WAIT_DAYS,
+                "reason": reason,
+            }),
+        );
+        lines.push(format!(
+            "override wait_days {wait_days} (default {DEFAULT_WAIT_DAYS}): {reason}"
+        ));
+        let (_, results) = write(k, signer, signer_name, role, producer_kind, op)?;
+        for r in results {
+            push(&mut lines, &mut refusals, r);
+        }
+    }
+
+    let now = k.now() / 1000;
+    let wait_secs = wait_days.saturating_mul(86_400);
+    for p in &pins {
+        let pin = format!("{}:{}@{}", p.ecosystem.as_str(), p.name, p.version);
+        let base = format!("quarantine:{pin}");
+        // Hash first, always: an already-adopted version is checked again on every scan,
+        // against the registry and against the hash recorded on the chain.
+        let recorded = ["adopted", "waiting"].iter().find_map(|s| {
+            k.state
+                .event_envelope(&format!("{base}:{s}"))
+                .and_then(|e| e.payload.get("integrity").and_then(|v| v.as_str()))
+                .map(String::from)
+        });
+        let refusal = match &p.registry_integrity {
+            None => Some((
+                "Q-02",
+                format!(
+                    "{pin} cannot be verified against {}: {}",
+                    p.registry,
+                    p.lookup_error.as_deref().unwrap_or("no registry hash")
+                ),
+            )),
+            Some(reg) if !reg.eq_ignore_ascii_case(&p.lock_integrity) => Some((
+                "Q-01",
+                format!(
+                    "{pin} hash mismatch: {} has {}, {} has {reg}",
+                    p.lockfile, p.lock_integrity, p.registry
+                ),
+            )),
+            Some(_) => match &recorded {
+                Some(r) if !r.eq_ignore_ascii_case(&p.lock_integrity) => Some((
+                    "Q-01",
+                    format!(
+                        "{pin} hash mismatch: {} has {}, the chain recorded {r}",
+                        p.lockfile, p.lock_integrity
+                    ),
+                )),
+                _ => None,
+            },
+        };
+        if let Some((rule, reason)) = refusal {
+            let attempted = EventEnvelope {
+                event_id: format!("{base}:refused"),
+                unix_timestamp: now,
+                source: p.registry.clone(),
+                module: QUARANTINE_MODULE.into(),
+                provenance: ProvenanceKind::Measured,
+                evidence_tag: Some(EvidenceTag::B),
+                source_ref: None,
+                payload: serde_json::json!({
+                    "ecosystem": p.ecosystem, "name": p.name, "version": p.version,
+                    "lock_integrity": p.lock_integrity, "registry_integrity": p.registry_integrity,
+                    "lockfile": p.lockfile,
+                }),
+                payload_hash: String::new(),
+                cid: String::new(),
+                duplicate_of: None,
+                lifecycle: Lifecycle::Draft,
+                signature_scheme: SignatureScheme::Ed25519,
+                signature: None,
+            };
+            let r = k.pick_role(signer, role, &ANY_ROLE);
+            let s = k.refuse(
+                signer,
+                r,
+                Body::EventEnvelope(attempted),
+                apparatus_schema::rws::Rejection { rule, reason },
+            )?;
+            push(&mut lines, &mut refusals, s);
+            continue;
+        }
+        if k.state.has_envelope_event(&format!("{base}:adopted")) {
+            skipped += 1;
+            continue;
+        }
+        let age = p.published_at.map(|t| now.saturating_sub(t));
+        let is_adopted = age.is_some_and(|a| a >= wait_secs);
+        let status = if is_adopted { "adopted" } else { "waiting" };
+        let event_id = format!("{base}:{status}");
+        if k.state.has_envelope_event(&event_id) {
+            skipped += 1;
+            continue;
+        }
+        // The previous adopted pin of this package stays the adopted one while this waits.
+        let previous = k
+            .state
+            .event_envelopes()
+            .filter(|e| e.module == QUARANTINE_MODULE)
+            .filter(|e| e.payload.get("status").and_then(|s| s.as_str()) == Some("adopted"))
+            .filter(|e| {
+                e.payload.get("ecosystem").and_then(|s| s.as_str()) == Some(p.ecosystem.as_str())
+                    && e.payload.get("name").and_then(|s| s.as_str()) == Some(p.name.as_str())
+            })
+            .max_by_key(|e| e.unix_timestamp)
+            .and_then(|e| e.payload.get("version").and_then(|v| v.as_str()))
+            .map(String::from);
+        let mut payload = serde_json::json!({
+            "ecosystem": p.ecosystem,
+            "name": p.name,
+            "version": p.version,
+            "integrity": p.lock_integrity,
+            "published_at": p.published_at,
+            "age_days": age.map(|a| a / 86_400),
+            "wait_days": wait_days,
+            "status": status,
+            "lockfile": p.lockfile,
+        });
+        if !is_adopted {
+            payload["adopted"] = serde_json::json!(previous);
+            lines.push(format!(
+                "pin {pin} waiting (age {} < {wait_days}d); adopted stays {}",
+                age.map_or("unknown".into(), |a| format!("{}d", a / 86_400)),
+                previous.as_deref().unwrap_or("none")
+            ));
+            waiting += 1;
+        } else {
+            adopted += 1;
+        }
+        let op = envelope(
+            event_id,
+            p.registry.clone(),
+            ProvenanceKind::Measured,
+            Some(EvidenceTag::B),
+            payload,
+        );
+        let (_, results) = write(k, signer, signer_name, role, producer_kind, op)?;
+        for r in results {
+            push(&mut lines, &mut refusals, r);
+        }
+    }
+
+    // Advisories become Advice. Advice is not policy: nothing is applied, no lockfile changes.
+    for a in &advisories {
+        for p in pins
+            .iter()
+            .filter(|p| p.ecosystem == a.ecosystem && p.name == a.package)
+            .filter(|p| a.bad_versions.contains(&p.version))
+        {
+            let pin = format!("{}:{}@{}", p.ecosystem.as_str(), p.name, p.version);
+            let summary = format!(
+                "quarantine advisory {}:{} {pin} is known bad; recommended {}; source {}; not applied (advice is not policy)",
+                a.feed,
+                a.id,
+                a.recommended.as_deref().unwrap_or("none"),
+                a.url
+            );
+            let exists = k.entries.iter().any(|e| {
+                e.receipt
+                    .operation_payload
+                    .get("summary")
+                    .and_then(|s| s.as_str())
+                    == Some(summary.as_str())
+            });
+            if exists {
+                skipped += 1;
+                continue;
+            }
+            let r = k.pick_role(
+                signer,
+                role,
+                &[
+                    Role::Adviser,
+                    Role::Execution,
+                    Role::Policy,
+                    Role::Continuity,
+                ],
+            );
+            let kind = producer_kind
+                .or_else(|| k.state.principal(signer).map(|p| p.kind))
+                .unwrap_or(PrincipalKind::Human);
+            let inputs = envelope_receipts(k, &format!("quarantine:{pin}:"));
+            lines.push(format!("advice {}:{} for {pin}", a.feed, a.id));
+            let s = k.submit(
+                signer,
+                r,
+                None,
+                vec![],
+                Body::Advice(Advice {
+                    producer: signer,
+                    producer_kind: kind,
+                    summary,
+                    inputs,
+                    addressed_to: Some(Role::Policy),
+                    respond_by: None,
+                }),
+            )?;
+            advised += 1;
+            push(&mut lines, &mut refusals, s);
+        }
+    }
+
+    lines.push(format!(
+        "quarantine: {} pins, {adopted} adopted, {waiting} waiting, {} refused, {skipped} already recorded, {advised} advice; lockfiles not modified",
+        pins.len(),
+        refusals.len()
+    ));
+    if let Some((rule, reason)) = refusals.first() {
+        let more = if refusals.len() > 1 {
+            format!(" (+{} more refused)", refusals.len() - 1)
+        } else {
+            String::new()
+        };
+        let mut r = Response::refused(rule, format!("REFUSED {rule}: {reason}{more}"));
+        r.lines = lines;
+        return Ok(r);
+    }
+    Ok(Response::ok(lines))
 }
 
 fn empty_policy(sub_kind: PolicySubKind) -> Policy {

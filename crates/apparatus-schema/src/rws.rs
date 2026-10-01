@@ -464,6 +464,11 @@ impl State {
         self.envelope_cids.get(cid).map(String::as_str)
     }
 
+    /// All event_envelopes on the chain (latest version per `event_id`), by `event_id`.
+    pub fn event_envelopes(&self) -> impl Iterator<Item = &EventEnvelope> {
+        self.envelope_events.values()
+    }
+
     /// The latest accepted version of an event_envelope.
     pub fn event_envelope(&self, event_id: &str) -> Option<&EventEnvelope> {
         self.envelope_events.get(event_id)

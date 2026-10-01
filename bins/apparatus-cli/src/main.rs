@@ -259,6 +259,12 @@ enum Rws {
         /// stated | measured | inferred
         #[arg(long, value_parser = parse_enum::<ProvenanceKind>)]
         provenance: ProvenanceKind,
+        /// A | B | C | E | NF (required for measured).
+        #[arg(long, value_parser = parse_enum::<EvidenceTag>)]
+        evidence_tag: Option<EvidenceTag>,
+        /// Source reference (required for inferred).
+        #[arg(long)]
+        source_ref: Option<String>,
         /// Default: a fresh UUIDv7.
         #[arg(long)]
         event_id: Option<String>,
@@ -716,6 +722,8 @@ fn to_request(cmd: Rws) -> Result<Request> {
             source,
             module,
             provenance,
+            evidence_tag,
+            source_ref,
             event_id,
             unix_timestamp,
             lifecycle,
@@ -742,6 +750,8 @@ fn to_request(cmd: Rws) -> Result<Request> {
                     source,
                     module,
                     provenance,
+                    evidence_tag,
+                    source_ref,
                     event_id,
                     unix_timestamp,
                     lifecycle,

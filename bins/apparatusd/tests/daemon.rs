@@ -330,6 +330,8 @@ fn envelopes_over_rpc_signed_by_the_daemon_and_refused_on_chain() {
             source: "agent:planner".into(),
             module: "dexos.plan".into(),
             provenance: ProvenanceKind::Inferred,
+            evidence_tag: None,
+            source_ref: Some("planner:run-1".into()),
             event_id: None,
             unix_timestamp: None,
             lifecycle: None,

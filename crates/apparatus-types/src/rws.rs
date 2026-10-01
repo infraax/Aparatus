@@ -626,6 +626,12 @@ pub struct EventEnvelope {
     pub source: String,
     pub module: String,
     pub provenance: ProvenanceKind,
+    /// Evidence strength. Required when `provenance` is `measured` (Stage 1, ENV-06).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_tag: Option<EvidenceTag>,
+    /// Where an inference came from. Required when `provenance` is `inferred` (ENV-06).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
     /// Inline JSON payload, at most 4 KB canonical (NAP T6 B.4).
     pub payload: serde_json::Value,
     /// Lowercase hex SHA-256 of the canonical payload bytes.
@@ -698,6 +704,8 @@ mod tests {
             source: "sensor".into(),
             module: "dexos.test".into(),
             provenance: ProvenanceKind::Measured,
+            evidence_tag: Some(EvidenceTag::C),
+            source_ref: None,
             payload: serde_json::json!({ "n": 1 }),
             payload_hash: String::new(),
             cid: String::new(),

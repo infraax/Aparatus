@@ -230,6 +230,12 @@ pub enum Op {
         source: String,
         module: String,
         provenance: ProvenanceKind,
+        /// Required for `measured` (ENV-06).
+        #[serde(default)]
+        evidence_tag: Option<EvidenceTag>,
+        /// Required for `inferred` (ENV-06).
+        #[serde(default)]
+        source_ref: Option<String>,
         /// Default: a fresh UUIDv7.
         #[serde(default)]
         event_id: Option<String>,
@@ -1075,6 +1081,8 @@ fn write(
             source,
             module,
             provenance,
+            evidence_tag,
+            source_ref,
             event_id,
             unix_timestamp,
             lifecycle,
@@ -1094,6 +1102,8 @@ fn write(
                 source,
                 module,
                 provenance,
+                evidence_tag,
+                source_ref,
                 payload,
                 payload_hash: payload_hash.unwrap_or(hash),
                 cid: cid.unwrap_or(address),

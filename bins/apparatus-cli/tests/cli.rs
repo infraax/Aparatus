@@ -577,6 +577,8 @@ fn envelope(dir: &Path, extra: &[&str]) -> Output {
         "dexos.climate",
         "--provenance",
         "measured",
+        "--evidence-tag",
+        "C",
     ];
     args.extend_from_slice(extra);
     run(dir, &args)
@@ -705,6 +707,99 @@ fn bad_envelopes_are_refusals_on_the_chain() {
         ledger_envelopes(&dir).len(),
         1,
         "only the good envelope landed"
+    );
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn sealed_event_envelope_mutation_is_refused_on_chain() {
+    let dir = tempdir("envsealed");
+    assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    let sealed = envelope(
+        &dir,
+        &[
+            "--data",
+            r#"{"n":1}"#,
+            "--event-id",
+            "s1",
+            "--lifecycle",
+            "sealed",
+        ],
+    );
+    assert!(
+        sealed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sealed.stderr)
+    );
+
+    // Same event_id, new content: ENV-07, exit 2, refusal receipt on the chain.
+    let o = envelope(&dir, &["--data", r#"{"n":2}"#, "--event-id", "s1"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("REFUSED ENV-07"));
+    assert!(stdout(&o).contains(" event "), "{}", stdout(&o));
+
+    // Anchoring is Stage 3: ENV-08.
+    let o = envelope(
+        &dir,
+        &[
+            "--data",
+            r#"{"n":3}"#,
+            "--event-id",
+            "a1",
+            "--lifecycle",
+            "anchored",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("REFUSED ENV-08"));
+
+    // Provenance rules at the CLI: measured without a tag, inferred without a source.
+    let o = run(
+        &dir,
+        &[
+            "rws",
+            "event-envelope",
+            "--data",
+            "{}",
+            "--source",
+            "s",
+            "--module",
+            "m",
+            "--provenance",
+            "measured",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("REFUSED ENV-06"));
+    let o = run(
+        &dir,
+        &[
+            "rws",
+            "event-envelope",
+            "--data",
+            "{}",
+            "--source",
+            "s",
+            "--module",
+            "m",
+            "--provenance",
+            "inferred",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("REFUSED ENV-06"));
+
+    let check = run(&dir, &["rws", "check"]);
+    assert!(check.status.success(), "{}", stdout(&check));
+    assert!(
+        stdout(&check).contains("refusals recorded: 4"),
+        "{}",
+        stdout(&check)
+    );
+    assert_eq!(
+        ledger_envelopes(&dir).len(),
+        1,
+        "only the sealed envelope landed"
     );
     fs::remove_dir_all(dir).ok();
 }

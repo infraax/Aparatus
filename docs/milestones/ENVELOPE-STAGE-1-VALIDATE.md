@@ -103,3 +103,47 @@ exit 1
 ```
 
 On replay ENV-09 makes the chain fail integrity: `Kernel::open` refuses to load it, so the daemon will not start on it.
+
+## Part 4 — documented refusals
+
+Fresh solo project, local mode. Each refusal is an `illegal_transition_rejected` receipt (the `event` line) and exit 2.
+
+```text
+$ apparatus rws event-envelope --data '{"n":1}' --source s --module dexos.neg --provenance stated --event-id neg-a --lifecycle anchored
+  01a0f7d2-5c7c-74ee-8b94-ae36f2e4be78 event 5e73ea33d1281f10d0e4e2959fd89e8428ad486a31b83e27cfe6136f6eead6de
+  REFUSED ENV-08: anchoring is Stage 3; an envelope cannot be anchored yet
+  exit 2
+$ apparatus rws event-envelope --data '{"n":2}' --source agent:planner --module dexos.neg --provenance inferred
+  01a0f7d2-5ca7-71c5-bed8-ec4f0ca54c44 event ff2d5b1c938dd015d216bbbdf9bf12ca73c3de7756af80fd5cfa36c53e5a5051
+  REFUSED ENV-06: inferred provenance needs a source_ref
+  exit 2
+$ apparatus rws event-envelope --data '{"n":3}' --source sensor:x --module dexos.neg --provenance measured
+  01a0f7d2-5cd3-72e3-a930-86df36ac53b9 event 4dbb7d5f2931e914d78c51ed0d2e618f6d906d86f25b9b2501938befdeadbe19
+  REFUSED ENV-06: measured provenance needs an evidence_tag (A, B, C, E or NF)
+  exit 2
+$ apparatus rws event-envelope --data '{"n":4}' --source sensor:x --module dexos.neg --provenance stated --event-id neg-s
+  … event_envelope neg-s … (signed)    exit 0
+$ apparatus rws event-envelope --data '{"n":4}' --source sensor:OTHER --module dexos.neg --provenance stated --event-id neg-s --lifecycle sealed
+  01a0f7d2-5d37-7411-b6d4-f2811010adfc event 9be161c77008ea95927341cb3c23b203bd29306ed1bb2428f8dbe1ead1606446
+  REFUSED ENV-05: sealing event_id neg-s may change only its lifecycle
+  exit 2
+```
+
+`rws check` afterwards: `chain ok: 9 receipts` (4 binds, 1 envelope, 4 refusals), `refusals recorded: 4`, `check ok`.
+
+**A clap typo is not a refusal.** It also exits 2, but nothing reaches the kernel:
+
+```text
+$ apparatus rws event-envelope --data '{"n":5}' --source s --module dexos.neg --provenance stated --lifecycle frozen
+  error: invalid value 'frozen' for '--lifecycle <LIFECYCLE>': invalid value 'frozen'
+  exit 2
+```
+
+No `REFUSED` line, no `event` receipt line, chain still 9 receipts with the same head
+(`01a0f7d2-5d37-…` `9be161c7…`). Tell the two apart by the `REFUSED <rule>` line on stderr, not by the exit code.
+
+## Not run
+
+- A second daemon or concurrent clients during the walk (covered by M3 tests, not re-run here).
+- ENV-04 forgery through the CLI: the CLI cannot submit a forged signature; covered by the schema test.
+- ML-DSA (stub only), anchoring, sealing replication: out of scope by design.

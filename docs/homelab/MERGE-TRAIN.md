@@ -51,6 +51,23 @@ To create the tag:
 git fetch origin && git tag -a homelab-0 92e41f80efbace70fc348ea03750d59dddd80a68 -m "homelab-0: merge train #18 #19 #20 #22 #30 plus #32 (two keys only)" && git push origin homelab-0
 ```
 
+### Third landing (2026-10-01): PR #33, docs only
+
+| PR | Head (gated) | Gate | Tests | `main` after merge |
+|---|---|---|---|---|
+| #33 Record PR #32 landing and the tag command | `6f7bb07` | dev-check.sh | 96/0 | **`5a19248dd022d7511628c919a783d5b432f620a7`** |
+
+- The `main` tree is identical to the gated head.
+- `scripts/dev-check.sh` on `main` passed all four gates: 96/0.
+- `ic-up.sh` still whitelists only `$DEV_PRINCIPAL` and `$AGENT_PRINCIPAL`.
+
+**Tag `homelab-0`: still not on the remote.**
+- It stays at `92e41f8`, because #33 changed docs only.
+- I made one traced push. I filtered its output too early, so I did not see the final HTTP status.
+- I ran a second plain push to read the outcome. It ended `unexpected disconnect while reading sideband packet` / `the remote end hung up unexpectedly`, the same failure as the earlier 403.
+- `git ls-remote origin refs/tags/homelab-0` returns nothing.
+- No further retries. The command to run is unchanged (see above).
+
 ## NAP-corpus
 
 | Order | PR | Head | `main` after merge |
@@ -60,5 +77,11 @@ git fetch origin && git tag -a homelab-0 92e41f80efbace70fc348ea03750d59dddd80a6
 | 2 | #30 Canister spike (retargeted to `main`) | `2c9ce93` | **`fb3a312cd84f79fb2446247f5d5dfec260330438`** |
 
 | 3 | #34 Identities, gate v2 behind a passed vote, INSTALL-ORDER, ledger mirror and identity register sketches | `84b30fb` | **`93c90e57eac84eb74828e2a8607fd9c0b6c16174`** |
+
+| 4 | #35 SNS-shaped policy book v4 and PUBLIC-CANISTERS.md | `36536e7` | **`18bd5017b96412473c3bfde04183e2e84ad98b87`** |
+
+After #35, `SNS-SHAPE.md` on `main` names the book-controlled notary hash
+`2001a55538db6c8b39812bb01469bd1bd1ca94fa45931ea93d64c06ff81855a4`. That is the hash rebuilt from the head with moc 1.6.0
+and the one installed in the run.
 
 The three research files are unchanged. NAP-corpus has no Rust gates; its canister tests run against the replica (see DEV-PATH.md).

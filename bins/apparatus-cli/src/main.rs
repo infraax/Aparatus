@@ -244,6 +244,36 @@ enum Rws {
         #[command(flatten)]
         signing: Signing,
     },
+    /// Record an event envelope (Stage 0): JSON payload, provenance, lifecycle, CID, signature.
+    Envelope {
+        /// JSON payload file, or `-` for stdin. Alternative to `--data`.
+        #[arg(long, conflicts_with = "data")]
+        payload: Option<PathBuf>,
+        /// Inline JSON payload.
+        #[arg(long)]
+        data: Option<String>,
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        module: String,
+        /// stated | measured | inferred
+        #[arg(long, value_parser = parse_enum::<ProvenanceKind>)]
+        provenance: ProvenanceKind,
+        /// Default: a fresh UUIDv7.
+        #[arg(long)]
+        event_id: Option<String>,
+        /// Seconds since the epoch. Default: now.
+        #[arg(long)]
+        unix_timestamp: Option<u64>,
+        /// draft | signed | sealed | anchored (default: signed; sealing is not enforced yet).
+        #[arg(long, value_parser = parse_enum::<Lifecycle>)]
+        lifecycle: Option<Lifecycle>,
+        /// ed25519 | ml_dsa_65_stub
+        #[arg(long, default_value = "ed25519", value_parser = parse_enum::<SignatureScheme>)]
+        scheme: SignatureScheme,
+        #[command(flatten)]
+        signing: Signing,
+    },
     /// List tickets.
     Tickets {
         #[arg(long)]
@@ -680,6 +710,47 @@ fn to_request(cmd: Rws) -> Result<Request> {
                 },
             ),
         },
+        Rws::Envelope {
+            payload,
+            data,
+            source,
+            module,
+            provenance,
+            event_id,
+            unix_timestamp,
+            lifecycle,
+            scheme,
+            signing,
+        } => {
+            let text = match (payload, data) {
+                (_, Some(d)) => d,
+                (Some(p), None) if p.as_os_str() == "-" => {
+                    let mut s = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+                    s
+                }
+                (Some(p), None) => std::fs::read_to_string(&p)
+                    .with_context(|| format!("reading {}", p.display()))?,
+                (None, None) => anyhow::bail!("give --payload <file|-> or --data <json>"),
+            };
+            let payload: serde_json::Value =
+                serde_json::from_str(&text).context("payload is not JSON")?;
+            req(
+                &signing,
+                Op::Envelope {
+                    payload,
+                    source,
+                    module,
+                    provenance,
+                    event_id,
+                    unix_timestamp,
+                    lifecycle,
+                    signature_scheme: scheme,
+                    payload_hash: None,
+                    cid: None,
+                },
+            )
+        }
         Rws::Tickets { open } => plain(None, Op::Tickets { open }),
         Rws::List { what } => plain(None, Op::List { what }),
         Rws::Head => plain(None, Op::Head),

@@ -317,3 +317,52 @@ fn stale_socket_and_second_daemon() {
     terminate(daemon);
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn envelopes_over_rpc_signed_by_the_daemon_and_refused_on_chain() {
+    use apparatus_types::rws::{ProvenanceKind, SignatureScheme};
+    let dir = solo_project("env");
+    let daemon = start(&dir);
+    let mut c = client(&dir);
+    let env = |payload: serde_json::Value, cid: Option<String>| {
+        as_owner(Op::Envelope {
+            payload,
+            source: "agent:planner".into(),
+            module: "dexos.plan".into(),
+            provenance: ProvenanceKind::Inferred,
+            event_id: None,
+            unix_timestamp: None,
+            lifecycle: None,
+            signature_scheme: SignatureScheme::Ed25519,
+            payload_hash: None,
+            cid,
+        })
+    };
+    let ok = c
+        .call(&env(serde_json::json!({ "step": 1 }), None))
+        .unwrap();
+    assert_eq!(ok.status, Status::Ok, "{ok:?}");
+    assert_eq!(ok.kind.as_deref(), Some("envelope"));
+    assert!(
+        dir.join(".apparatus/keys/ed25519.seed").exists(),
+        "the daemon (the only writer) owns the key"
+    );
+
+    // A client that states a wrong CID is refused, and the refusal is on the chain.
+    let bad = c
+        .call(&env(
+            serde_json::json!({ "step": 2 }),
+            Some("bafkr4iwrong".into()),
+        ))
+        .unwrap();
+    assert_eq!(bad.status, Status::Refused, "{bad:?}");
+    assert_eq!(bad.rule.as_deref(), Some("ENV-03"));
+    assert_eq!(bad.lines.len(), 1, "the refusal event receipt");
+
+    // Daemon still up; CLI goes through it and check is green.
+    let check = cli(&dir, &["rws", "check"]);
+    assert!(check.status.success(), "{}", out(&check));
+    assert!(out(&check).contains("refusals recorded: 1"));
+    assert!(terminate(daemon).success());
+    std::fs::remove_dir_all(dir).ok();
+}

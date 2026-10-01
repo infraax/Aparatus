@@ -566,3 +566,142 @@ fn parallel_ingests_never_corrupt_the_chain() {
     assert_eq!(ledger.matches("\"kind\":\"ingest\"").count(), accepted);
     fs::remove_dir_all(dir).ok();
 }
+
+fn envelope(dir: &Path, extra: &[&str]) -> Output {
+    let mut args = vec![
+        "rws",
+        "envelope",
+        "--source",
+        "sensor:bme280",
+        "--module",
+        "dexos.climate",
+        "--provenance",
+        "measured",
+    ];
+    args.extend_from_slice(extra);
+    run(dir, &args)
+}
+
+/// The receipt JSON of the last envelope line on the chain.
+fn ledger_envelopes(dir: &Path) -> Vec<serde_json::Value> {
+    fs::read_to_string(dir.join(".apparatus/ledger.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .map(|r| r["operation_payload"].clone())
+        .filter(|p| p["kind"] == "envelope")
+        .collect()
+}
+
+#[test]
+fn envelope_receipts_signed_stub_and_draft() {
+    let dir = tempdir("envelope");
+    assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    fs::write(dir.join("p.json"), br#"{"temp_c":21,"room":"lab"}"#).unwrap();
+    let p = dir.join("p.json");
+
+    let signed = envelope(
+        &dir,
+        &["--payload", p.to_str().unwrap(), "--event-id", "evt-1"],
+    );
+    assert!(
+        signed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
+    let text = stdout(&signed);
+    assert!(text.starts_with("envelope evt-1 cid bafkr4i"), "{text}");
+    assert!(text.lines().last().unwrap().contains(" envelope "));
+
+    let stub = envelope(
+        &dir,
+        &["--data", r#"{"n":1}"#, "--scheme", "ml-dsa-65-stub"],
+    );
+    assert!(
+        stub.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stub.stderr)
+    );
+    let draft = envelope(&dir, &["--data", r#"{"n":1}"#, "--lifecycle", "draft"]);
+    assert!(draft.status.success());
+    let sealed = envelope(&dir, &["--data", r#"{"n":2}"#, "--lifecycle", "sealed"]);
+    assert!(sealed.status.success(), "sealing is stored, not enforced");
+
+    let envs = ledger_envelopes(&dir);
+    assert_eq!(envs.len(), 4);
+    assert_eq!(envs[0]["event_id"], "evt-1");
+    assert_eq!(envs[0]["provenance"], "measured");
+    assert_eq!(envs[0]["lifecycle"], "signed");
+    assert_eq!(envs[0]["signature_scheme"], "ed25519");
+    assert_eq!(envs[0]["payload"]["temp_c"], 21);
+    assert!(envs[0]["signature"]["signing_key_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("ARCHIVE-KID-"));
+    assert_eq!(envs[1]["signature_scheme"], "ml_dsa_65_stub");
+    assert_eq!(envs[2]["lifecycle"], "draft");
+    assert!(envs[2]["signature"].is_null());
+    assert_eq!(envs[3]["lifecycle"], "sealed");
+    // Same payload, same content address.
+    assert_eq!(envs[1]["cid"], envs[2]["cid"]);
+    assert_eq!(envs[1]["payload_hash"], envs[2]["payload_hash"]);
+
+    // The node key is private to the writer.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(dir.join(".apparatus/keys/ed25519.seed"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    // Replay verifies every signature again: check stays green.
+    let check = run(&dir, &["rws", "check"]);
+    assert!(check.status.success(), "{}", stdout(&check));
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn bad_envelopes_are_refusals_on_the_chain() {
+    let dir = tempdir("envbad");
+    assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    assert!(envelope(&dir, &["--data", "{}", "--event-id", "dup"])
+        .status
+        .success());
+
+    let cases: [(&[&str], &str); 4] = [
+        (&["--data", r#"{"x":1.5}"#], "ENV-02"),
+        (&["--data", "{}", "--event-id", "dup"], "ENV-05"),
+        (&["--data", "{}", "--unix-timestamp", "0"], "ENV-01"),
+        (&["--data", "{}", "--event-id", " "], "ENV-01"),
+    ];
+    for (extra, rule) in cases {
+        let o = envelope(&dir, extra);
+        assert_eq!(o.status.code(), Some(2), "{rule}: {}", stdout(&o));
+        let stderr = String::from_utf8_lossy(&o.stderr);
+        assert!(stderr.contains(&format!("REFUSED {rule}")), "{stderr}");
+        // The refusal itself is a receipt: one `event` line on stdout.
+        assert!(stdout(&o).contains(" event "), "{}", stdout(&o));
+    }
+    let big = format!(r#"{{"blob":"{}"}}"#, "x".repeat(5000));
+    let o = envelope(&dir, &["--data", &big]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("REFUSED ENV-02"));
+
+    // Not JSON at all: a usage error before any receipt, exit 1.
+    let o = envelope(&dir, &["--data", "not json"]);
+    assert_eq!(o.status.code(), Some(1));
+
+    let check = run(&dir, &["rws", "check"]);
+    assert!(check.status.success(), "{}", stdout(&check));
+    let text = stdout(&check);
+    assert!(text.contains("refusals recorded: 5"), "{text}");
+    assert_eq!(
+        ledger_envelopes(&dir).len(),
+        1,
+        "only the good envelope landed"
+    );
+    fs::remove_dir_all(dir).ok();
+}

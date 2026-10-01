@@ -113,6 +113,41 @@ fn classify(base: &str, e: AgentError) -> IcError {
     }
 }
 
+/// A local IC identity key: raw 32-byte Ed25519 seed in a file of mode 0600.
+/// Returns `(principal text, created)`. Creates the file only if it does not exist.
+/// The principal is the one ic-agent's `BasicIdentity` signs as.
+pub fn key_principal(path: &std::path::Path) -> Result<(String, bool), String> {
+    use ic_agent::identity::{BasicIdentity, Identity};
+    let (key, created) = match std::fs::read(path) {
+        Ok(b) => (
+            <[u8; 32]>::try_from(b.as_slice())
+                .map_err(|_| format!("{} is not a 32-byte key", path.display()))?,
+            false,
+        ),
+        Err(_) => {
+            let mut k = [0u8; 32];
+            getrandom::fill(&mut k).map_err(|e| format!("randomness: {e}"))?;
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            use std::io::Write;
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            opts.open(path)
+                .and_then(|mut f| f.write_all(&k))
+                .map_err(|e| format!("creating {}: {e}", path.display()))?;
+            (k, true)
+        }
+    };
+    let principal = BasicIdentity::from_raw_key(&key).sender()?;
+    Ok((principal.to_text(), created))
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -204,6 +239,31 @@ pub mod testing {
 mod tests {
     use super::testing::{serve, status_cbor, C};
     use super::*;
+
+    #[test]
+    fn key_file_is_created_once_with_mode_0600() {
+        let dir = std::env::temp_dir().join(format!("apparatus-ic-key-{}", std::process::id()));
+        let path = dir.join("k.key");
+        let (p1, created) = key_principal(&path).unwrap();
+        assert!(created);
+        let (p2, created) = key_principal(&path).unwrap();
+        assert!(!created);
+        assert_eq!(p1, p2, "same key, same principal");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        // Self-authenticating principals end in "-qe" style base32 with a 0x02 suffix.
+        assert_eq!(
+            Principal::from_text(&p1).unwrap().as_slice().last(),
+            Some(&0x02)
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn down_replica_is_a_typed_unreachable_error() {

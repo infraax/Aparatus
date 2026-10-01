@@ -85,6 +85,8 @@ else
 fi
 
 PIDF="$IC_DIR/run/replica.pid"
+# Cap the log before a start (Design B as a cap, LOG-POLICY.md §6). Never while running.
+if ! { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }; then "$ROOT/scripts/log-cap.sh"; fi
 if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
   echo "replica already running (pid $(cat "$PIDF")): $IC_STATUS_URL"; exit 0
 fi

@@ -134,3 +134,50 @@ What that means:
 - This is the replica's retention working. **A five-minute run does not show a plateau**, and none is claimed.
 
 `run/` went from 137 252 159 bytes at start to 130 772 599 at 5 min. The drop is the purge, not the log.
+
+## 6. Design B on what remains (Part 3): a cap, not a pipeline
+
+**Choice.** After Part 2 the log still grows, but at about **71 B/s ≈ 6 MB a day ≈ 184 MB a month**. That is not worth the full Design B pipeline: rotation on a timer, zstd, a cold transport, and archiving the spool. **Design B is reduced to a cap.**
+
+`scripts/log-cap.sh`, called by `scripts/ic-up.sh` before every start:
+
+1. **Size boundary.** `IC_LOG_CAP_BYTES`, default 64 MiB. Under the boundary, nothing happens.
+2. **Copy, then truncate.**
+   - The live `run/replica.log` is copied to a closed segment **outside the state dir**: `IC_LOG_SEGMENTS`, default `.ic-local/log-segments/`, which is git-ignored and can be pointed at the anker's cold disk.
+   - The copy is verified (same sha256, same byte count) before the live log is truncated. If the copy does not match, the log is left untouched.
+   - Segments are mode 0444 and are **never deleted or rewritten** by the script.
+3. **Hash of the closed segment.** `segments.jsonl` gets one line per segment: `{seq, file, bytes, sha256, prev_sha256, first_line_prefix, closed_utc}`.
+   - `prev_sha256` chains the segments, so a missing segment shows as a break.
+   - The segment `sha256` **is a leaf the anker may later seal into a daily root**. Nothing is sealed or sent in this session, and nothing goes to mainnet.
+4. **Only while the replica is stopped.** With the replica running, the script refuses. That way no line can land between the copy and the truncate.
+   - At the measured rate, the 64 MiB boundary is reached after about 11 days of uptime. A replica that never restarts would need a live rotation, which is **not built**.
+
+**`run/backup`: left alone.** The replica's own hourly purge stays.
+- Part 2 shows the purge working: 10.54 MB → 3.41 MB after start.
+- Part 2 also shows the spool climbing again: 3.41 → 4.04 MB in 4 minutes.
+- Five minutes cannot show a plateau. The spool is not moved unless a run of more than an hour shows it still climbing past the purge.
+
+### Proof
+
+**Fixture.** `IC_DIR` pointing at a scratch directory, cap 1 000 bytes:
+
+| Step | Result |
+|---|---|
+| 677-byte log | `nothing to close`, exit 0 |
+| 4 053-byte log | segment 0 closed. Its sha256 `c6a87ddf…` equals the log's sha256 before the cap. Live log 0 bytes |
+| Second log | segment 1 closed, `prev_sha256 = c6a87ddf…` (chained) |
+| A live process under `run/replica.pid` | `refusing (stop it first)`, exit 1 |
+| Re-hash every segment against `segments.jsonl` | `OK`, `OK` |
+
+**This repo's real log.** Replica stopped, default cap:
+
+```text
+$ scripts/log-cap.sh
+log-cap: closed segment 0: .ic-local/log-segments/replica.000000.20261001T190220Z.log (93496542 bytes, sha256 4163009cdc9f9e3cccae64a5b09f736f0af38e99e569c91f07a15364aa5654ce, prev none); replica.log truncated
+$ cat .ic-local/log-segments/segments.jsonl
+{"seq":0,"file":"replica.000000.20261001T190220Z.log","bytes":93496542,"sha256":"4163009cdc9f9e3cccae64a5b09f736f0af38e99e569c91f07a15364aa5654ce","prev_sha256":"","first_line_prefix":"Oct_01_15_28_37","closed_utc":"20261001T190220Z"}
+```
+
+- **What moved:** 93.5 MB of history (mostly old metric dumps) moved out of `run/` into one verified, read-only segment.
+- **What was deleted:** nothing.
+- **The live log** starts again at 0 bytes and grows at about 71 B/s.

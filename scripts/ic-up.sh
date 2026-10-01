@@ -69,7 +69,24 @@ if [ ! -f replica.json5 ]; then
       sample.json5 > replica.json5
 fi
 
+# Long-run log policy (docs/homelab/LOG-POLICY.md): metrics are NOT written to replica.log.
+# The stock config keeps `exporter: "log"`; each start renders replica.active.json5 from it with
+# `exporter: { file: ... }` instead (the replica dumps metrics to that file once, on shutdown).
+# The HTTP exporter is not an option here: it binds [::] and panics on an IPv4-only host.
+# Debug run: IC_METRICS_LOG=1 scripts/ic-up.sh keeps the stock periodic metrics in replica.log.
+if [ "${IC_METRICS_LOG:-0}" = "1" ]; then
+  cp replica.json5 replica.active.json5
+  echo "metrics: log exporter (IC_METRICS_LOG=1, debug run)"
+else
+  sed -e "s|^        exporter: \"log\",|        exporter: { file: \"$IC_DIR/run/metrics-at-shutdown.prom\" },|" \
+      replica.json5 > replica.active.json5
+  grep -q "^        exporter: { file: " replica.active.json5 || { echo "could not set the file exporter in replica.active.json5; refusing" >&2; exit 1; }
+  echo "metrics: file exporter, dumped once at shutdown to run/metrics-at-shutdown.prom (not in replica.log)"
+fi
+
 PIDF="$IC_DIR/run/replica.pid"
+# Cap the log before a start (Design B as a cap, LOG-POLICY.md §6). Never while running.
+if ! { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }; then "$ROOT/scripts/log-cap.sh"; fi
 if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
   echo "replica already running (pid $(cat "$PIDF")): $IC_STATUS_URL"; exit 0
 fi
@@ -77,7 +94,7 @@ if curl -sf -o /dev/null "$IC_STATUS_URL"; then
   echo "something else already answers on $IC_STATUS_URL; refusing to start a second replica" >&2; exit 1
 fi
 (cd "$IC_DIR/bin" && exec nohup ./replica --replica-version $IC_COMMIT --guestos-version $IC_COMMIT \
-  --config-file "$IC_DIR/replica.json5" >> "$IC_DIR/run/replica.log" 2>&1) &
+  --config-file "$IC_DIR/replica.active.json5" >> "$IC_DIR/run/replica.log" 2>&1) &
 echo $! > "$PIDF"
 for _ in $(seq 1 60); do
   curl -sf -o /dev/null "$IC_STATUS_URL" && { echo "replica up (pid $(cat "$PIDF")): $IC_STATUS_URL"; exit 0; }

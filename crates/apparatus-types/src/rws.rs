@@ -193,7 +193,8 @@ pub struct Payload {
     pub body: Body,
 }
 
-/// The eleven v1 payload kinds (RWS-2.0 X-02). No others exist.
+/// The payload kinds: the eleven of RWS-2.0 X-02 plus `envelope` (NAP-corpus #12,
+/// Envelope Stage 0; within the "~12" limit of RWS-2.0-MAPPING §2). No others exist.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Body {
@@ -208,6 +209,7 @@ pub enum Body {
     Event(Event),
     Correction(Correction),
     Review(Review),
+    Envelope(EventEnvelope),
 }
 
 impl Body {
@@ -225,6 +227,7 @@ impl Body {
             Body::Event(_) => "event",
             Body::Correction(_) => "correction",
             Body::Review(_) => "review",
+            Body::Envelope(_) => "envelope",
         }
     }
 }
@@ -557,6 +560,83 @@ pub struct Review {
     pub trigger: Option<Trigger>,
 }
 
+/// How the content of an envelope came to be known (ENVELOP.md §1, mandatory).
+/// Named `ProvenanceKind` because `apparatus_types::Provenance` is the header's lineage struct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvenanceKind {
+    Stated,
+    Measured,
+    Inferred,
+}
+
+/// Envelope lifecycle (ENVELOP.md §2, NAP T6 B.10/C). Stored, not enforced, in
+/// Stage 0: `sealed` and `anchored` are accepted as declared (sealing is #13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Lifecycle {
+    Draft,
+    Signed,
+    Sealed,
+    Anchored,
+}
+
+/// Signature scheme of an envelope. Additive only: a scheme name is never
+/// reused, so receipts signed under it stay verifiable as what they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SignatureScheme {
+    /// Ed25519 (RFC 8032). The real Stage 0 path.
+    #[serde(rename = "ed25519")]
+    Ed25519,
+    /// ML-DSA-65 placeholder: verification always succeeds. Replaced by a new
+    /// `ml_dsa_65` scheme in Stage 2 (#14), not by changing this one.
+    #[serde(rename = "ml_dsa_65_stub")]
+    MlDsa65Stub,
+}
+
+impl SignatureScheme {
+    /// The wire name.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SignatureScheme::Ed25519 => "ed25519",
+            SignatureScheme::MlDsa65Stub => "ml_dsa_65_stub",
+        }
+    }
+}
+
+/// A signature over an envelope's signing bytes (see `apparatus_schema::envelope`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvelopeSignature {
+    /// `ARCHIVE-KID-…`, bound to the scheme (NAP T6 D.3).
+    pub signing_key_id: String,
+    /// Lowercase hex public key.
+    pub public_key: String,
+    /// Lowercase hex signature.
+    pub value: String,
+}
+
+/// An event envelope (ENVELOP.md §1, NAP-corpus #12): a typed record on the
+/// existing chain. The chain's SHA-256 link still covers the whole receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventEnvelope {
+    pub event_id: String,
+    /// Seconds since the Unix epoch.
+    pub unix_timestamp: u64,
+    pub source: String,
+    pub module: String,
+    pub provenance: ProvenanceKind,
+    /// Inline JSON payload, at most 4 KB canonical (NAP T6 B.4).
+    pub payload: serde_json::Value,
+    /// Lowercase hex SHA-256 of the canonical payload bytes.
+    pub payload_hash: String,
+    /// CID v1 (raw, BLAKE3-256, base32 lowercase) of the canonical payload bytes.
+    pub cid: String,
+    pub lifecycle: Lifecycle,
+    pub signature_scheme: SignatureScheme,
+    /// Absent only while `lifecycle` is `draft`.
+    pub signature: Option<EnvelopeSignature>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,6 +687,36 @@ mod tests {
         assert!(serde_json::from_value::<Payload>(v.clone()).is_err());
         v["kind"] = "vision_deck".into();
         assert!(serde_json::from_value::<Payload>(v).is_err());
+    }
+
+    #[test]
+    fn envelope_kind_and_enums_on_the_wire() {
+        let p = payload(Body::Envelope(EventEnvelope {
+            event_id: "e1".into(),
+            unix_timestamp: 1,
+            source: "sensor".into(),
+            module: "dexos.test".into(),
+            provenance: ProvenanceKind::Measured,
+            payload: serde_json::json!({ "n": 1 }),
+            payload_hash: String::new(),
+            cid: String::new(),
+            lifecycle: Lifecycle::Draft,
+            signature_scheme: SignatureScheme::MlDsa65Stub,
+            signature: None,
+        }));
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["kind"], "envelope");
+        assert_eq!(v["provenance"], "measured");
+        assert_eq!(v["lifecycle"], "draft");
+        assert_eq!(v["signature_scheme"], "ml_dsa_65_stub");
+        assert_eq!(serde_json::from_value::<Payload>(v.clone()).unwrap(), p);
+        // Provenance is a closed enum, not a free string.
+        let mut bad = v.clone();
+        bad["provenance"] = "guessed".into();
+        assert!(serde_json::from_value::<Payload>(bad).is_err());
+        let mut bad = v;
+        bad["lifecycle"] = "frozen".into();
+        assert!(serde_json::from_value::<Payload>(bad).is_err());
     }
 
     #[test]

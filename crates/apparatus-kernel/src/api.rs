@@ -260,9 +260,39 @@ pub enum Op {
         event_id: String,
         to: Lifecycle,
     },
+    /// Record a local IC replica status read (`rws ic status`). The client reads the
+    /// replica; the writer records it. `ok` → one measured event_envelope (evidence B,
+    /// source = status URL, payload = height + health); `unreachable` → refusal IC-01;
+    /// `bad_response` → refusal IC-02. Same height again → `duplicate_of` (ENV-09).
+    IcStatus {
+        /// The status URL that was read, e.g. `http://127.0.0.1:8080/api/v2/status`.
+        url: String,
+        reading: IcReading,
+    },
     /// Test hook: panics inside the handler when the executor allows it.
     DebugPanic,
 }
+
+/// What the client got from the replica status endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum IcReading {
+    Ok {
+        #[serde(default)]
+        replica_health_status: Option<String>,
+        #[serde(default)]
+        certified_height: Option<u64>,
+    },
+    Unreachable {
+        reason: String,
+    },
+    BadResponse {
+        reason: String,
+    },
+}
+
+/// Module name on IC status envelopes.
+pub const IC_STATUS_MODULE: &str = "apparatus.ic.status";
 
 fn human() -> PrincipalKind {
     PrincipalKind::Human
@@ -1165,6 +1195,77 @@ fn write(
             let line = format!("event_envelope {event_id} {} -> {}", name(from), name(to));
             let result = k.submit(signer, role, None, vec![], Body::EventEnvelope(env))?;
             Ok((vec![line], vec![result]))
+        }
+        Op::IcStatus { url, reading } => {
+            let (rule, reason) = match reading {
+                IcReading::Ok {
+                    replica_health_status,
+                    certified_height,
+                } => {
+                    let line = format!(
+                        "ic status {url} {} certified_height {}",
+                        replica_health_status.as_deref().unwrap_or("-"),
+                        certified_height.map_or("-".into(), |h| h.to_string())
+                    );
+                    let (mut extra, results) = write(
+                        k,
+                        signer,
+                        signer_name,
+                        role,
+                        producer_kind,
+                        Op::EventEnvelope {
+                            payload: serde_json::json!({
+                                "certified_height": certified_height,
+                                "replica_health_status": replica_health_status,
+                            }),
+                            source: url,
+                            module: IC_STATUS_MODULE.into(),
+                            provenance: ProvenanceKind::Measured,
+                            evidence_tag: Some(EvidenceTag::B),
+                            source_ref: None,
+                            event_id: None,
+                            unix_timestamp: None,
+                            lifecycle: None,
+                            signature_scheme: SignatureScheme::Ed25519,
+                            payload_hash: None,
+                            cid: None,
+                        },
+                    )?;
+                    extra.insert(0, line);
+                    return Ok((extra, results));
+                }
+                IcReading::Unreachable { reason } => {
+                    ("IC-01", format!("replica unreachable at {url}: {reason}"))
+                }
+                IcReading::BadResponse { reason } => {
+                    ("IC-02", format!("bad status response from {url}: {reason}"))
+                }
+            };
+            // Nothing was measured: record the attempt as a refusal, never drop it.
+            let attempted = EventEnvelope {
+                event_id: ObjectId::new_v7().to_string(),
+                unix_timestamp: k.now() / 1000,
+                source: url,
+                module: IC_STATUS_MODULE.into(),
+                provenance: ProvenanceKind::Measured,
+                evidence_tag: Some(EvidenceTag::B),
+                source_ref: None,
+                payload: serde_json::Value::Null,
+                payload_hash: String::new(),
+                cid: String::new(),
+                duplicate_of: None,
+                lifecycle: Lifecycle::Draft,
+                signature_scheme: SignatureScheme::Ed25519,
+                signature: None,
+            };
+            let role = k.pick_role(signer, role, &ANY_ROLE);
+            let result = k.refuse(
+                signer,
+                role,
+                Body::EventEnvelope(attempted),
+                apparatus_schema::rws::Rejection { rule, reason },
+            )?;
+            Ok((vec![], vec![result]))
         }
         Op::Head
         | Op::Check

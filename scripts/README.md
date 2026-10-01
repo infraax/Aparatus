@@ -8,7 +8,7 @@ from the repo root. Linux x86_64 (the IC binaries are x86_64-linux). Needs `carg
 ```bash
 scripts/ic-up.sh       # 1. local IC replica (stock binaries, verified)
 scripts/dev-up.sh      # 2. apparatusd for this repo; prints the socket path
-# 3. the status command (see the section below, once added)
+target/debug/apparatus rws ic status   # 3. read the replica, record its height on the chain (via apparatusd)
 scripts/dev-down.sh    # stop apparatusd
 scripts/ic-down.sh     # stop the replica
 scripts/dev-check.sh   # the four gates, any time
@@ -23,6 +23,10 @@ scripts/dev-check.sh   # the four gates, any time
 | `dev-up.sh` | Builds `apparatus` and `apparatusd` (`--locked`), runs `rws init --solo` once if `.apparatus/` is empty, starts `apparatusd --project <repo>`, prints the socket path (`.apparatus/apparatusd.sock`, mode 0600). | Start a second daemon (prints the running one instead). |
 | `dev-down.sh` | SIGTERM to that `apparatusd` (finishes queued requests, removes the socket). | Touch any other process. |
 | `dev-check.sh` | `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `cargo build --workspace --locked`. Stops at the first failure. | — |
+
+`rws ic status` (not a script): reads `http://127.0.0.1:8080/api/v2/status` through ic-agent and writes one measured
+`event_envelope` (evidence B) with the certified height and health; replica down → refusal IC-01 on the chain, exit 2.
+See `docs/milestones/IC-STATUS.md`.
 
 `.apparatus/` and `.ic-local/` are git-ignored. Ports used: `8080/tcp` (replica public API), `2497` (replica transport).
 Set `IC_DIR=` to put the replica elsewhere. Full manual runbook: NAP-corpus `docs/ic/LOCAL-RUN.md`.

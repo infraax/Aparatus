@@ -91,6 +91,7 @@ name = "apparatus-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "apparatus-ic",
  "apparatus-kernel",
  "apparatus-types",
  "clap",

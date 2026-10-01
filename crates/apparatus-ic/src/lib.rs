@@ -117,24 +117,12 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn down_replica_is_a_typed_unreachable_error() {
-        // Bind and drop: the port is free and nothing listens on it.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let err = status(&format!("http://127.0.0.1:{port}")).unwrap_err();
-        assert!(err.is_unreachable(), "{err:?}");
-    }
-
+/// Test support: a local HTTP stub that answers like a replica status endpoint.
+/// Used by this crate's and the CLI's tests; never by the committed read path.
+#[doc(hidden)]
+pub mod testing {
     /// Minimal CBOR for a status map: text keys; text, unsigned or byte-string values.
-    enum C<'a> {
+    pub enum C<'a> {
         T(&'a str),
         U(u64),
         B(&'a [u8]),
@@ -156,7 +144,7 @@ mod tests {
         }
     }
 
-    fn status_cbor(fields: &[(&str, C)]) -> Vec<u8> {
+    pub fn status_cbor(fields: &[(&str, C)]) -> Vec<u8> {
         let mut out = vec![0xd9, 0xd9, 0xf7]; // self-describe tag 55799
         head(5, fields.len() as u64, &mut out);
         for (k, v) in fields {
@@ -178,7 +166,7 @@ mod tests {
     }
 
     /// Serve `body` as application/cbor to every request on a fresh local port.
-    fn serve(body: Vec<u8>) -> String {
+    pub fn serve(body: Vec<u8>) -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -196,6 +184,37 @@ mod tests {
             }
         });
         url
+    }
+
+    /// Serve a healthy status with `height` on a fresh local port; returns the base URL.
+    pub fn serve_status(health: &str, height: u64) -> String {
+        serve(status_cbor(&[
+            (
+                "impl_version",
+                C::T("d26cd031176beec51b39fbb9e39e80a3a46a748e"),
+            ),
+            ("replica_health_status", C::T(health)),
+            ("certified_height", C::U(height)),
+            ("root_key", C::B(&[7u8; 133])),
+        ]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{serve, status_cbor, C};
+    use super::*;
+
+    #[test]
+    fn down_replica_is_a_typed_unreachable_error() {
+        // Bind and drop: the port is free and nothing listens on it.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let err = status(&format!("http://127.0.0.1:{port}")).unwrap_err();
+        assert!(err.is_unreachable(), "{err:?}");
     }
 
     #[test]

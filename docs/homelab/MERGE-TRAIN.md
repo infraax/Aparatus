@@ -68,6 +68,21 @@ git fetch origin && git tag -a homelab-0 92e41f80efbace70fc348ea03750d59dddd80a6
 - `git ls-remote origin refs/tags/homelab-0` returns nothing.
 - No further retries. The command to run is unchanged (see above).
 
+### Fourth landing (2026-10-01): PR #34, docs only
+
+| PR | Head (gated) | Gate | Tests | `main` after merge |
+|---|---|---|---|---|
+| #34 Record PR #33 and NAP #35 | `572a4a6` | dev-check.sh | 96/0 | **`6f80ae0534ca339d3ddf99de217e4938c72836aa`** |
+
+The tag was not pushed this time, as instructed. It now waits on Dex in **#35**: `homelab-0` at `5a19248` or a newer main.
+
+### Issue pass (2026-10-01)
+
+| Closed | Opened | Comment only |
+|---|---|---|
+| Aparatus #23 and #31 (both split; the tag went to #35) | Aparatus #35 (tag) | NAP #18 (left open, needs a second node) |
+| NAP #12 (split → #38), #13, #7, #8, #23, #21 (split → #39), #1 (split → #37) | NAP #37 (N=7 and state sync), #38 (ingest → event_envelope), #39 (money states) | NAP #14, #15, #9, #10, #4: "deferred, not this session", still open |
+
 ## NAP-corpus
 
 | Order | PR | Head | `main` after merge |
@@ -83,5 +98,12 @@ git fetch origin && git tag -a homelab-0 92e41f80efbace70fc348ea03750d59dddd80a6
 After #35, `SNS-SHAPE.md` on `main` names the book-controlled notary hash
 `2001a55538db6c8b39812bb01469bd1bd1ca94fa45931ea93d64c06ff81855a4`. That is the hash rebuilt from the head with moc 1.6.0
 and the one installed in the run.
+
+| 5 | #36 Daily-root canister (Group 6) and checkup sketch | `2b5c0ae` | **`25b5c37b32c276e28e29b021126ac6b12e149bf7`** |
+
+Hashes rebuilt from the merged `main` match what is installed:
+
+- daily root: `71a24604fa46b176616d8fad19e8f81b63b91a953be2ae84650fd9c2983b18e6`
+- notary: `2001a55538db6c8b39812bb01469bd1bd1ca94fa45931ea93d64c06ff81855a4`
 
 The three research files are unchanged. NAP-corpus has no Rust gates; its canister tests run against the replica (see DEV-PATH.md).

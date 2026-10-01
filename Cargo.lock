@@ -118,8 +118,10 @@ dependencies = [
 name = "apparatus-ic"
 version = "0.1.0"
 dependencies = [
+ "candid",
  "getrandom 0.4.3",
  "ic-agent",
+ "serde",
  "sha2 0.10.9",
  "thiserror 1.0.69",
  "tokio",

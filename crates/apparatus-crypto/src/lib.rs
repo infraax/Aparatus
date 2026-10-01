@@ -1,9 +1,18 @@
 //! Cryptographic primitives for Apparatus.
 //!
-//! Provides explicit hashing mechanisms, notably SHA-256 for artifacts.
+//! Provides explicit hashing mechanisms, notably SHA-256 for artifacts and the
+//! chain, plus the envelope layer's BLAKE3/CID v1 addresses and signing keys.
 
 use sha2::{Digest, Sha256};
 use std::fmt;
+
+pub mod canonical;
+pub mod cid;
+pub mod signing;
+
+pub use canonical::{canonical_json, CanonicalError};
+pub use cid::{Blake3Digest, Cid, CidCodec};
+pub use signing::{Ed25519Key, MlDsa65Stub, SigningKey};
 
 /// An error that occurs during cryptographic operations.
 #[derive(Debug, thiserror::Error)]

@@ -3,7 +3,7 @@
 //! Provides the receipt domain type, canonical JSON hashing (RWS-2.0 X-04),
 //! and `FileLedger`: an append-only JSONL chain with a HEAD pointer.
 
-use apparatus_crypto::Sha256Digest;
+use apparatus_crypto::{CanonicalError, Sha256Digest};
 use apparatus_store::{ReceiptLedger, StoreError};
 use apparatus_types::{ObjectHeader, ReceiptId};
 use serde::{Deserialize, Serialize};
@@ -66,50 +66,10 @@ impl Receipt {
 /// Encode a JSON value canonically: object keys sorted by byte order, no
 /// insignificant whitespace, and no floating-point numbers.
 pub fn canonical_json(value: &Value) -> Result<Vec<u8>, LedgerError> {
-    let mut out = Vec::new();
-    write_canonical(value, &mut out)?;
-    Ok(out)
-}
-
-fn write_canonical(value: &Value, out: &mut Vec<u8>) -> Result<(), LedgerError> {
-    match value {
-        Value::Null | Value::Bool(_) | Value::String(_) => {
-            out.extend_from_slice(serde_json::to_string(value)?.as_bytes());
-        }
-        Value::Number(n) => {
-            if n.is_f64() {
-                return Err(LedgerError::NonCanonical(format!(
-                    "floating-point number {n} not allowed; use integer units"
-                )));
-            }
-            out.extend_from_slice(n.to_string().as_bytes());
-        }
-        Value::Array(items) => {
-            out.push(b'[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(b',');
-                }
-                write_canonical(item, out)?;
-            }
-            out.push(b']');
-        }
-        Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            out.push(b'{');
-            for (i, key) in keys.into_iter().enumerate() {
-                if i > 0 {
-                    out.push(b',');
-                }
-                out.extend_from_slice(serde_json::to_string(key)?.as_bytes());
-                out.push(b':');
-                write_canonical(&map[key], out)?;
-            }
-            out.push(b'}');
-        }
-    }
-    Ok(())
+    apparatus_crypto::canonical_json(value).map_err(|e| match e {
+        CanonicalError::NonCanonical(m) => LedgerError::NonCanonical(m),
+        CanonicalError::Serialization(e) => LedgerError::Serialization(e),
+    })
 }
 
 /// Exclusive writer lock on `<dir>/LOCK`.

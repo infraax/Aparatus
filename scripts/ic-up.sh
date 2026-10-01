@@ -28,9 +28,18 @@ fi
 cd "$IC_DIR"
 
 # Bootstrap once: one node, one subnet (index 0 = System/root).
+# Provisional whitelist "*": any principal may create canisters on this loopback-only dev
+# replica (needed to install a canister without dfx). A real subnet would list its controller.
+if [ -d prep/ic_registry_local_store ] && [ ! -f prep/whitelist.json ]; then
+  echo "$IC_DIR/prep was bootstrapped without a provisional whitelist (canister creation refused)." >&2
+  echo "Re-bootstrap: scripts/ic-down.sh && rm -rf $IC_DIR/prep $IC_DIR/run $IC_DIR/replica.json5" >&2
+  exit 1
+fi
 if [ ! -d prep/ic_registry_local_store ]; then
   mkdir -p prep
+  echo '{"provisional_whitelist": ["*"]}' > prep/whitelist.json
   ./bin/ic-prep --working-dir "$IC_DIR/prep" --replica-version $IC_COMMIT --allow-empty-update-image \
+    --provisional-whitelist "$IC_DIR/prep/whitelist.json" \
     --node 'idx:0,subnet_idx:0,xnet_api:"127.0.0.1:2497",public_api:"127.0.0.1:8080"'
 fi
 

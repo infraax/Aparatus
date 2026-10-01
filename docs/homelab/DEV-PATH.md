@@ -1,5 +1,9 @@
 # Dev path on homelab-0: one run from a fresh directory
 
+> **Superseded in part (2026-10-01, PR #32).** This run used `2e35958`, which still whitelisted `"*"`. `main`
+> `92e41f8`, the current `homelab-0` target, whitelists only the dev and agent principals that `ic-up.sh` creates in
+> `.ic-local/`. The notary, policy book and quarantine steps below run unchanged with `IC_INSTALL_KEY=.ic-local/dev.key`.
+
 Run 2026-10-01. Fresh clones in an empty directory (`$RUN`):
 
 - Aparatus at `2e359581cfff99e23874345d2bdba2474771d175`. This is main after PR #30, and the commit the

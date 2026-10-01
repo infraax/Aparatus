@@ -27,21 +27,30 @@ else
 fi
 cd "$IC_DIR"
 
-# Bootstrap once: one node, one subnet (index 0 = System/root).
-# Provisional whitelist "*": any principal may create canisters on this loopback-only dev
-# replica (needed to install a canister without dfx). A real subnet would list its controller.
-if [ -d prep/ic_registry_local_store ] && [ ! -f prep/whitelist.json ]; then
-  echo "$IC_DIR/prep was bootstrapped without a provisional whitelist (canister creation refused)." >&2
+# Identities (docs: NAP-corpus docs/ic/canisters/IDENTITIES.md). Raw Ed25519 seeds, mode 0600, git-ignored.
+#   dev.key   — installs and upgrades canisters (controller), creates canisters
+#   agent.key — may create nothing it controls; only calls methods it is allowed to (e.g. notary record)
+cargo build --locked -q --manifest-path "$ROOT/Cargo.toml" -p apparatus-cli
+APP="$ROOT/target/debug/apparatus"
+DEV_PRINCIPAL=$("$APP" rws ic key "$IC_DIR/dev.key" | cut -d' ' -f1)
+AGENT_PRINCIPAL=$("$APP" rws ic key "$IC_DIR/agent.key" | cut -d' ' -f1)
+
+# Bootstrap once: one node, one subnet (index 0 = System/root). The provisional whitelist holds exactly the
+# two principals above: an unknown principal cannot create a canister on this replica.
+WANT="{\"provisional_whitelist\": [\"$DEV_PRINCIPAL\", \"$AGENT_PRINCIPAL\"]}"
+if [ -d prep/ic_registry_local_store ] && [ "$(cat prep/whitelist.json 2>/dev/null)" != "$WANT" ]; then
+  echo "$IC_DIR/prep was bootstrapped with a different provisional whitelist than dev.key + agent.key." >&2
   echo "Re-bootstrap: scripts/ic-down.sh && rm -rf $IC_DIR/prep $IC_DIR/run $IC_DIR/replica.json5" >&2
   exit 1
 fi
 if [ ! -d prep/ic_registry_local_store ]; then
   mkdir -p prep
-  echo '{"provisional_whitelist": ["*"]}' > prep/whitelist.json
+  echo "$WANT" > prep/whitelist.json
   ./bin/ic-prep --working-dir "$IC_DIR/prep" --replica-version $IC_COMMIT --allow-empty-update-image \
     --provisional-whitelist "$IC_DIR/prep/whitelist.json" \
     --node 'idx:0,subnet_idx:0,xnet_api:"127.0.0.1:2497",public_api:"127.0.0.1:8080"'
 fi
+echo "identities: dev $DEV_PRINCIPAL ($IC_DIR/dev.key), agent $AGENT_PRINCIPAL ($IC_DIR/agent.key)"
 
 # Config once: the stock sample with only the fields that must change.
 if [ ! -f replica.json5 ]; then

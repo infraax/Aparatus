@@ -331,6 +331,8 @@ enum Rws {
 
 #[derive(Subcommand, Debug)]
 enum IcCmd {
+    /// Create a local IC identity key (raw Ed25519 seed, mode 0600) if missing; print its principal.
+    Key { path: PathBuf },
     /// Read the replica status through ic-agent and record it as a measured event_envelope.
     /// Replica down: a refusal on the chain (IC-01), exit 2.
     Status {
@@ -444,6 +446,16 @@ fn rws(root: &Path, cmd: Rws) -> Result<ExitCode> {
         Rws::ImportJsonl { path } => {
             refuse_if_daemon(root)?;
             print_lines(Kernel::import_jsonl(root, &path, None, false)?);
+            Ok(ExitCode::SUCCESS)
+        }
+        Rws::Ic(IcCmd::Key { path }) => {
+            let (principal, created) =
+                apparatus_ic::key_principal(&path).map_err(|e| anyhow::anyhow!(e))?;
+            println!(
+                "{principal} {} {}",
+                path.display(),
+                if created { "created" } else { "existing" }
+            );
             Ok(ExitCode::SUCCESS)
         }
         Rws::Quarantine {
@@ -863,6 +875,7 @@ fn to_request(cmd: Rws) -> Result<Request> {
             )
         }
         Rws::Quarantine { .. } => unreachable!("handled in rws()"),
+        Rws::Ic(IcCmd::Key { .. }) => unreachable!("handled in rws()"),
         Rws::Ic(IcCmd::Status { url, signing }) => {
             let status_url = apparatus_ic::status_url(&url);
             let reading = match apparatus_ic::status(&url) {

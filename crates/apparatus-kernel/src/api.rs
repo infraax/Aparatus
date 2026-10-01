@@ -230,6 +230,12 @@ pub enum Op {
         source: String,
         module: String,
         provenance: ProvenanceKind,
+        /// Required for `measured` (ENV-06).
+        #[serde(default)]
+        evidence_tag: Option<EvidenceTag>,
+        /// Required for `inferred` (ENV-06).
+        #[serde(default)]
+        source_ref: Option<String>,
         /// Default: a fresh UUIDv7.
         #[serde(default)]
         event_id: Option<String>,
@@ -246,6 +252,13 @@ pub enum Op {
         payload_hash: Option<String>,
         #[serde(default)]
         cid: Option<String>,
+    },
+    /// Move an existing event_envelope to `to` (Stage 1). The writer copies the
+    /// latest stored version, sets `lifecycle`, and signs when it leaves `draft`.
+    /// The schema rules (ENV-04..08) decide; a refusal is recorded on the chain.
+    EventEnvelopeAdvance {
+        event_id: String,
+        to: Lifecycle,
     },
     /// Test hook: panics inside the handler when the executor allows it.
     DebugPanic,
@@ -1075,6 +1088,8 @@ fn write(
             source,
             module,
             provenance,
+            evidence_tag,
+            source_ref,
             event_id,
             unix_timestamp,
             lifecycle,
@@ -1094,13 +1109,22 @@ fn write(
                 source,
                 module,
                 provenance,
+                evidence_tag,
+                source_ref,
                 payload,
                 payload_hash: payload_hash.unwrap_or(hash),
                 cid: cid.unwrap_or(address),
+                duplicate_of: None,
                 lifecycle,
                 signature_scheme,
                 signature: None,
             };
+            // ENV-09: same bytes under another event_id are kept as a reference to the first.
+            env.duplicate_of = k
+                .state
+                .cid_owner(&env.cid)
+                .filter(|owner| *owner != env.event_id)
+                .map(String::from);
             if lifecycle != Lifecycle::Draft && envelope::payload_bytes(&env.payload).is_ok() {
                 let node = k.node_key()?;
                 match signature_scheme {
@@ -1111,9 +1135,36 @@ fn write(
                 }
                 .map_err(|e| anyhow!(e))?;
             }
-            let cid_line = format!("event_envelope {} cid {}", env.event_id, env.cid);
+            let mut cid_line = format!("event_envelope {} cid {}", env.event_id, env.cid);
+            if let Some(owner) = &env.duplicate_of {
+                cid_line.push_str(&format!(" duplicate_of {owner}"));
+            }
             let result = k.submit(signer, role, None, vec![], Body::EventEnvelope(env))?;
             Ok((vec![cid_line], vec![result]))
+        }
+        Op::EventEnvelopeAdvance { event_id, to } => {
+            let role = k.pick_role(signer, role, &ANY_ROLE);
+            let Some(mut env) = k.state.event_envelope(&event_id).cloned() else {
+                bail!("no event_envelope with event_id {event_id} on this chain");
+            };
+            let from = env.lifecycle;
+            env.lifecycle = to;
+            if to == Lifecycle::Draft {
+                env.signature = None;
+            } else if from == Lifecycle::Draft {
+                let node = k.node_key()?;
+                match env.signature_scheme {
+                    SignatureScheme::Ed25519 => envelope::sign(&mut env, &node),
+                    SignatureScheme::MlDsa65Stub => {
+                        envelope::sign(&mut env, &MlDsa65Stub::new(node.public_key()))
+                    }
+                }
+                .map_err(|e| anyhow!(e))?;
+            }
+            let name = |l: Lifecycle| format!("{l:?}").to_lowercase();
+            let line = format!("event_envelope {event_id} {} -> {}", name(from), name(to));
+            let result = k.submit(signer, role, None, vec![], Body::EventEnvelope(env))?;
+            Ok((vec![line], vec![result]))
         }
         Op::Head
         | Op::Check

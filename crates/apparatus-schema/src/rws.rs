@@ -372,8 +372,10 @@ pub struct State {
     origin_role: BTreeMap<ObjectId, Role>,
     /// Chain position of the latest displacement event per subject (K-09).
     last_displacement: BTreeMap<ObjectId, usize>,
-    /// `event_id`s of envelope receipts (ENV-05).
-    envelope_events: BTreeSet<String>,
+    /// Latest accepted version of each event_envelope, by `event_id` (ENV-05, ENV-07).
+    envelope_events: BTreeMap<String, EventEnvelope>,
+    /// First `event_id` that carried each CID (ENV-09). One content address, one owner.
+    envelope_cids: BTreeMap<String, String>,
 }
 
 /// Rank used for corrections: a corrector must rank at least as high as the
@@ -454,7 +456,17 @@ impl State {
 
     /// True if an envelope with this `event_id` is on the chain.
     pub fn has_envelope_event(&self, event_id: &str) -> bool {
-        self.envelope_events.contains(event_id)
+        self.envelope_events.contains_key(event_id)
+    }
+
+    /// The `event_id` that first carried `cid`, if any.
+    pub fn cid_owner(&self, cid: &str) -> Option<&str> {
+        self.envelope_cids.get(cid).map(String::as_str)
+    }
+
+    /// The latest accepted version of an event_envelope.
+    pub fn event_envelope(&self, event_id: &str) -> Option<&EventEnvelope> {
+        self.envelope_events.get(event_id)
     }
 
     pub fn has_digest(&self, digest: &str) -> bool {
@@ -1244,16 +1256,78 @@ impl State {
         self.check_refs(&e.refs, "F-01")
     }
 
-    /// ENV-05: an envelope's `event_id` is unique on the chain (append-only;
-    /// a correction is a new event, ENVELOP.md §1).
+    /// Lifecycle transitions per `event_id` (Stage 1, NAP-corpus #13).
+    ///
+    /// - New `event_id`: may start at `draft`, `signed` or `sealed` (sealed-at-creation
+    ///   still needs a valid signature, ENV-04).
+    /// - ENV-07 a `sealed` object never changes again (same pattern as K-01).
+    /// - ENV-05 `draft` → `draft` | `signed`; `signed` → `sealed` only, and sealing
+    ///   changes nothing but `lifecycle`. `signed` is one-way; `draft` → `sealed` is refused.
+    /// - `anchored` is refused statelessly (ENV-08).
     fn check_envelope(&self, e: &EventEnvelope) -> Result<(), Rejection> {
-        if self.envelope_events.contains(&e.event_id) {
-            return Err(Rejection::new(
-                "ENV-05",
-                format!("event_id {} is already on the chain", e.event_id),
-            ));
+        self.check_envelope_transition(e)?;
+        self.check_envelope_cid(e)
+    }
+
+    /// ENV-09: one CID, one content object. A second event with the same payload
+    /// bytes is kept as a reference: it must name the first owner in `duplicate_of`.
+    /// An envelope whose CID is new carries no `duplicate_of`.
+    fn check_envelope_cid(&self, e: &EventEnvelope) -> Result<(), Rejection> {
+        let expected = self
+            .envelope_cids
+            .get(&e.cid)
+            .filter(|owner| **owner != e.event_id);
+        match (expected, &e.duplicate_of) {
+            (None, None) => Ok(()),
+            (Some(owner), Some(d)) if d == owner => Ok(()),
+            (Some(owner), _) => Err(Rejection::new(
+                "ENV-09",
+                format!(
+                    "cid {} is already carried by event_id {owner}; set duplicate_of to it",
+                    e.cid
+                ),
+            )),
+            (None, Some(d)) => Err(Rejection::new(
+                "ENV-09",
+                format!(
+                    "duplicate_of {d} given, but cid {} is not on the chain under another event_id",
+                    e.cid
+                ),
+            )),
         }
-        Ok(())
+    }
+
+    fn check_envelope_transition(&self, e: &EventEnvelope) -> Result<(), Rejection> {
+        let Some(prev) = self.envelope_events.get(&e.event_id) else {
+            return Ok(());
+        };
+        let id = &e.event_id;
+        match (prev.lifecycle, e.lifecycle) {
+            (Lifecycle::Sealed | Lifecycle::Anchored, _) => Err(Rejection::new(
+                "ENV-07",
+                format!("event_id {id} is sealed; it cannot change"),
+            )),
+            (Lifecycle::Draft, Lifecycle::Draft | Lifecycle::Signed) => Ok(()),
+            (Lifecycle::Draft, _) => Err(Rejection::new(
+                "ENV-05",
+                format!("event_id {id} is a draft; sign it before sealing"),
+            )),
+            (Lifecycle::Signed, Lifecycle::Sealed) => {
+                let mut unsealed = e.clone();
+                unsealed.lifecycle = Lifecycle::Signed;
+                if &unsealed != prev {
+                    return Err(Rejection::new(
+                        "ENV-05",
+                        format!("sealing event_id {id} may change only its lifecycle"),
+                    ));
+                }
+                Ok(())
+            }
+            (Lifecycle::Signed, _) => Err(Rejection::new(
+                "ENV-05",
+                format!("event_id {id} is signed; the only next state is sealed"),
+            )),
+        }
     }
 
     fn check_correction(&self, payload: &Payload, c: &Correction) -> Result<(), Rejection> {
@@ -1487,7 +1561,10 @@ impl State {
                 });
             }
             Body::EventEnvelope(e) => {
-                self.envelope_events.insert(e.event_id.clone());
+                self.envelope_cids
+                    .entry(e.cid.clone())
+                    .or_insert_with(|| e.event_id.clone());
+                self.envelope_events.insert(e.event_id.clone(), e.clone());
             }
             Body::Correction(_) | Body::Review(_) => {}
         }
@@ -2422,5 +2499,221 @@ mod tests {
             ticket(EventKind::ReportBackResolved, None),
         );
         assert_eq!(again.unwrap_err().rule, "A-07");
+    }
+
+    // ---- Envelope Stage 1: lifecycle transitions (NAP-corpus #13) ----
+
+    fn env(event_id: &str, payload: serde_json::Value, lifecycle: Lifecycle) -> EventEnvelope {
+        let (payload_hash, cid) =
+            crate::envelope::address(&crate::envelope::payload_bytes(&payload).unwrap());
+        EventEnvelope {
+            event_id: event_id.into(),
+            unix_timestamp: 1_790_401_238,
+            source: "sensor".into(),
+            module: "dexos.test".into(),
+            provenance: ProvenanceKind::Stated,
+            evidence_tag: None,
+            source_ref: None,
+            payload,
+            payload_hash,
+            cid,
+            duplicate_of: None,
+            lifecycle,
+            signature_scheme: SignatureScheme::Ed25519,
+            signature: None,
+        }
+    }
+
+    fn signed(mut e: EventEnvelope, key: &apparatus_crypto::Ed25519Key) -> EventEnvelope {
+        if e.lifecycle == Lifecycle::Draft {
+            e.lifecycle = Lifecycle::Signed;
+        }
+        crate::envelope::sign(&mut e, key).unwrap();
+        e
+    }
+
+    fn put(h: &mut Harness, e: EventEnvelope) -> Result<ObjectId, Rejection> {
+        h.try_(
+            h.owner,
+            Role::Execution,
+            None,
+            vec![],
+            Body::EventEnvelope(e),
+        )
+    }
+
+    #[test]
+    fn envelope_walks_draft_signed_sealed() {
+        let mut h = Harness::solo();
+        let key = apparatus_crypto::Ed25519Key::generate().unwrap();
+        let draft = env("e1", serde_json::json!({ "n": 1 }), Lifecycle::Draft);
+        put(&mut h, draft.clone()).unwrap();
+        // draft → draft: still editable.
+        let redraft = env("e1", serde_json::json!({ "n": 2 }), Lifecycle::Draft);
+        put(&mut h, redraft.clone()).unwrap();
+        // draft → signed needs a signature the Ed25519 path accepts.
+        let s = signed(redraft, &key);
+        put(&mut h, s.clone()).unwrap();
+        // signed → sealed changes only the lifecycle.
+        let mut sealed = s.clone();
+        sealed.lifecycle = Lifecycle::Sealed;
+        put(&mut h, sealed).unwrap();
+        assert_eq!(
+            h.state.event_envelope("e1").unwrap().lifecycle,
+            Lifecycle::Sealed
+        );
+    }
+
+    #[test]
+    fn draft_to_signed_needs_a_verifying_signature() {
+        let mut h = Harness::solo();
+        put(&mut h, env("e1", serde_json::json!({}), Lifecycle::Draft)).unwrap();
+        // Claimed signed without a signature: ENV-04.
+        let bare = env("e1", serde_json::json!({}), Lifecycle::Signed);
+        assert_eq!(put(&mut h, bare).unwrap_err().rule, "ENV-04");
+        // A forged Ed25519 signature: ENV-04.
+        let key = apparatus_crypto::Ed25519Key::generate().unwrap();
+        let mut forged = signed(env("e1", serde_json::json!({}), Lifecycle::Draft), &key);
+        forged.signature.as_mut().unwrap().value = "00".repeat(64);
+        assert_eq!(put(&mut h, forged).unwrap_err().rule, "ENV-04");
+        // The ML-DSA-65 stub still verifies as true (Stage 2 replaces it under a new name).
+        let mut stub = env("e1", serde_json::json!({}), Lifecycle::Signed);
+        stub.signature_scheme = SignatureScheme::MlDsa65Stub;
+        crate::envelope::sign(&mut stub, &apparatus_crypto::MlDsa65Stub::new(vec![1; 32])).unwrap();
+        put(&mut h, stub).unwrap();
+    }
+
+    #[test]
+    fn signed_is_one_way_and_sealing_changes_only_lifecycle() {
+        let mut h = Harness::solo();
+        let key = apparatus_crypto::Ed25519Key::generate().unwrap();
+        let s = signed(
+            env("e1", serde_json::json!({ "n": 1 }), Lifecycle::Draft),
+            &key,
+        );
+        put(&mut h, s.clone()).unwrap();
+        // signed → draft and signed → signed: ENV-05.
+        let back = env("e1", serde_json::json!({ "n": 1 }), Lifecycle::Draft);
+        assert_eq!(put(&mut h, back).unwrap_err().rule, "ENV-05");
+        let resign = signed(
+            env("e1", serde_json::json!({ "n": 9 }), Lifecycle::Draft),
+            &key,
+        );
+        assert_eq!(put(&mut h, resign).unwrap_err().rule, "ENV-05");
+        // signed → sealed with different content: ENV-05.
+        let mut changed = signed(
+            env("e1", serde_json::json!({ "n": 2 }), Lifecycle::Draft),
+            &key,
+        );
+        changed.lifecycle = Lifecycle::Sealed;
+        assert_eq!(put(&mut h, changed).unwrap_err().rule, "ENV-05");
+        // draft → sealed skips signing: refused.
+        put(&mut h, env("e2", serde_json::json!({}), Lifecycle::Draft)).unwrap();
+        let mut skip = signed(env("e2", serde_json::json!({}), Lifecycle::Draft), &key);
+        skip.lifecycle = Lifecycle::Sealed;
+        assert_eq!(put(&mut h, skip).unwrap_err().rule, "ENV-05");
+    }
+
+    #[test]
+    fn sealed_objects_never_change_and_anchoring_is_refused() {
+        let mut h = Harness::solo();
+        let key = apparatus_crypto::Ed25519Key::generate().unwrap();
+        let mut sealed = signed(
+            env("e1", serde_json::json!({ "n": 1 }), Lifecycle::Draft),
+            &key,
+        );
+        sealed.lifecycle = Lifecycle::Sealed;
+        put(&mut h, sealed.clone()).unwrap();
+        // Any later receipt for the sealed event_id: ENV-07, whatever it carries.
+        let mutation = signed(
+            env("e1", serde_json::json!({ "n": 2 }), Lifecycle::Draft),
+            &key,
+        );
+        assert_eq!(put(&mut h, mutation).unwrap_err().rule, "ENV-07");
+        assert_eq!(put(&mut h, sealed.clone()).unwrap_err().rule, "ENV-07");
+        // sealed → anchored is Stage 3: ENV-08 (stateless, before the sealed rule).
+        let mut anchored = sealed;
+        anchored.lifecycle = Lifecycle::Anchored;
+        assert_eq!(put(&mut h, anchored.clone()).unwrap_err().rule, "ENV-08");
+        let mut fresh = signed(env("fresh", serde_json::json!({}), Lifecycle::Draft), &key);
+        fresh.lifecycle = Lifecycle::Anchored;
+        assert_eq!(put(&mut h, fresh).unwrap_err().rule, "ENV-08");
+    }
+
+    #[test]
+    fn provenance_needs_its_evidence() {
+        let mut h = Harness::solo();
+        let mut m = env("m", serde_json::json!({ "p": "m" }), Lifecycle::Draft);
+        m.provenance = ProvenanceKind::Measured;
+        assert_eq!(put(&mut h, m.clone()).unwrap_err().rule, "ENV-06");
+        for tag in [
+            EvidenceTag::A,
+            EvidenceTag::B,
+            EvidenceTag::C,
+            EvidenceTag::E,
+            EvidenceTag::Nf,
+        ] {
+            let mut ok = m.clone();
+            ok.evidence_tag = Some(tag);
+            ok.event_id = format!("m-{tag:?}");
+            // Distinct bytes per event: a repeat would be an ENV-09 reference case.
+            ok.payload = serde_json::json!({ "tag": format!("{tag:?}") });
+            let (hash, cid) =
+                crate::envelope::address(&crate::envelope::payload_bytes(&ok.payload).unwrap());
+            ok.payload_hash = hash;
+            ok.cid = cid;
+            put(&mut h, ok).unwrap();
+        }
+        let mut i = env("i", serde_json::json!({ "p": "i" }), Lifecycle::Draft);
+        i.provenance = ProvenanceKind::Inferred;
+        assert_eq!(put(&mut h, i.clone()).unwrap_err().rule, "ENV-06");
+        i.source_ref = Some("  ".into());
+        assert_eq!(put(&mut h, i.clone()).unwrap_err().rule, "ENV-06");
+        i.source_ref = Some("model:planner@run-7".into());
+        put(&mut h, i).unwrap();
+        // stated needs neither.
+        put(
+            &mut h,
+            env("s", serde_json::json!({ "p": "s" }), Lifecycle::Draft),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn same_bytes_twice_is_one_cid_and_a_reference() {
+        let mut h = Harness::solo();
+        let key = apparatus_crypto::Ed25519Key::generate().unwrap();
+        let first = signed(
+            env("a", serde_json::json!({ "x": 1 }), Lifecycle::Draft),
+            &key,
+        );
+        put(&mut h, first.clone()).unwrap();
+        assert_eq!(h.state.cid_owner(&first.cid), Some("a"));
+
+        // Same bytes under another event_id without the reference: ENV-09.
+        let bare = signed(
+            env("b", serde_json::json!({ "x": 1 }), Lifecycle::Draft),
+            &key,
+        );
+        assert_eq!(bare.cid, first.cid, "same bytes, same CID");
+        assert_eq!(put(&mut h, bare).unwrap_err().rule, "ENV-09");
+        // Pointing at the wrong owner: ENV-09.
+        let mut wrong = env("b", serde_json::json!({ "x": 1 }), Lifecycle::Draft);
+        wrong.duplicate_of = Some("nobody".into());
+        let wrong = signed(wrong, &key);
+        assert_eq!(put(&mut h, wrong).unwrap_err().rule, "ENV-09");
+        // With duplicate_of = first owner: accepted, still one owner for the CID.
+        let mut reference = env("b", serde_json::json!({ "x": 1 }), Lifecycle::Draft);
+        reference.duplicate_of = Some("a".into());
+        put(&mut h, signed(reference, &key)).unwrap();
+        assert_eq!(h.state.cid_owner(&first.cid), Some("a"));
+        // A reference on a new CID: ENV-09.
+        let mut stray = env("c", serde_json::json!({ "x": 2 }), Lifecycle::Draft);
+        stray.duplicate_of = Some("a".into());
+        assert_eq!(put(&mut h, stray).unwrap_err().rule, "ENV-09");
+        // The same event_id moving through its lifecycle is not a duplicate of itself.
+        let mut sealed = first;
+        sealed.lifecycle = Lifecycle::Sealed;
+        put(&mut h, sealed).unwrap();
     }
 }

@@ -626,12 +626,22 @@ pub struct EventEnvelope {
     pub source: String,
     pub module: String,
     pub provenance: ProvenanceKind,
+    /// Evidence strength. Required when `provenance` is `measured` (Stage 1, ENV-06).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_tag: Option<EvidenceTag>,
+    /// Where an inference came from. Required when `provenance` is `inferred` (ENV-06).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
     /// Inline JSON payload, at most 4 KB canonical (NAP T6 B.4).
     pub payload: serde_json::Value,
     /// Lowercase hex SHA-256 of the canonical payload bytes.
     pub payload_hash: String,
     /// CID v1 (raw, BLAKE3-256, base32 lowercase) of the canonical payload bytes.
     pub cid: String,
+    /// `event_id` of the first envelope that carried this `cid`, when another
+    /// event already did (Stage 1, ENV-09). Set by the writer; in signature scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_of: Option<String>,
     pub lifecycle: Lifecycle,
     pub signature_scheme: SignatureScheme,
     /// Absent only while `lifecycle` is `draft`.
@@ -698,9 +708,12 @@ mod tests {
             source: "sensor".into(),
             module: "dexos.test".into(),
             provenance: ProvenanceKind::Measured,
+            evidence_tag: Some(EvidenceTag::C),
+            source_ref: None,
             payload: serde_json::json!({ "n": 1 }),
             payload_hash: String::new(),
             cid: String::new(),
+            duplicate_of: None,
             lifecycle: Lifecycle::Draft,
             signature_scheme: SignatureScheme::MlDsa65Stub,
             signature: None,

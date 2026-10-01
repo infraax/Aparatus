@@ -577,6 +577,8 @@ fn envelope(dir: &Path, extra: &[&str]) -> Output {
         "dexos.climate",
         "--provenance",
         "measured",
+        "--evidence-tag",
+        "C",
     ];
     args.extend_from_slice(extra);
     run(dir, &args)
@@ -705,6 +707,195 @@ fn bad_envelopes_are_refusals_on_the_chain() {
         ledger_envelopes(&dir).len(),
         1,
         "only the good envelope landed"
+    );
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn sealed_event_envelope_mutation_is_refused_on_chain() {
+    let dir = tempdir("envsealed");
+    assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    let sealed = envelope(
+        &dir,
+        &[
+            "--data",
+            r#"{"n":1}"#,
+            "--event-id",
+            "s1",
+            "--lifecycle",
+            "sealed",
+        ],
+    );
+    assert!(
+        sealed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sealed.stderr)
+    );
+
+    // Same event_id, new content: ENV-07, exit 2, refusal receipt on the chain.
+    let o = envelope(&dir, &["--data", r#"{"n":2}"#, "--event-id", "s1"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("REFUSED ENV-07"));
+    assert!(stdout(&o).contains(" event "), "{}", stdout(&o));
+
+    // Anchoring is Stage 3: ENV-08.
+    let o = envelope(
+        &dir,
+        &[
+            "--data",
+            r#"{"n":3}"#,
+            "--event-id",
+            "a1",
+            "--lifecycle",
+            "anchored",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("REFUSED ENV-08"));
+
+    // Provenance rules at the CLI: measured without a tag, inferred without a source.
+    let o = run(
+        &dir,
+        &[
+            "rws",
+            "event-envelope",
+            "--data",
+            "{}",
+            "--source",
+            "s",
+            "--module",
+            "m",
+            "--provenance",
+            "measured",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("REFUSED ENV-06"));
+    let o = run(
+        &dir,
+        &[
+            "rws",
+            "event-envelope",
+            "--data",
+            "{}",
+            "--source",
+            "s",
+            "--module",
+            "m",
+            "--provenance",
+            "inferred",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("REFUSED ENV-06"));
+
+    let check = run(&dir, &["rws", "check"]);
+    assert!(check.status.success(), "{}", stdout(&check));
+    assert!(
+        stdout(&check).contains("refusals recorded: 4"),
+        "{}",
+        stdout(&check)
+    );
+    assert_eq!(
+        ledger_envelopes(&dir).len(),
+        1,
+        "only the sealed envelope landed"
+    );
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn same_payload_twice_is_one_cid_stored_as_reference() {
+    let dir = tempdir("envdup");
+    assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    let a = envelope(&dir, &["--data", r#"{"t":21}"#, "--event-id", "a"]);
+    assert!(a.status.success());
+    // Key order differs; canonical bytes and CID do not.
+    let b = envelope(&dir, &["--data", r#"{ "t" : 21 }"#, "--event-id", "b"]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    assert!(stdout(&b).contains("duplicate_of a"), "{}", stdout(&b));
+
+    let envs = ledger_envelopes(&dir);
+    assert_eq!(envs.len(), 2);
+    assert_eq!(envs[0]["cid"], envs[1]["cid"], "one CID");
+    assert!(envs[0].get("duplicate_of").is_none());
+    assert_eq!(
+        envs[1]["duplicate_of"], "a",
+        "second is a reference to the first"
+    );
+    let check = run(&dir, &["rws", "check"]);
+    assert!(check.status.success(), "{}", stdout(&check));
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn event_envelope_walks_draft_signed_sealed_via_cli() {
+    let dir = tempdir("envwalk");
+    assert!(run(&dir, &["rws", "init", "--solo"]).status.success());
+    let to = |id: &str, state: &str| {
+        run(
+            &dir,
+            &["rws", "event-envelope", "--event-id", id, "--to", state],
+        )
+    };
+    let refused = |o: &Output, rule: &str| {
+        assert_eq!(o.status.code(), Some(2), "{rule}: {}", stdout(o));
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains(&format!("REFUSED {rule}")),
+            "{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        assert!(stdout(o).contains(" event "), "refusal is a receipt");
+    };
+
+    assert!(envelope(
+        &dir,
+        &[
+            "--data",
+            r#"{"t":1}"#,
+            "--event-id",
+            "w1",
+            "--lifecycle",
+            "draft"
+        ]
+    )
+    .status
+    .success());
+    // draft → sealed skips signing: ENV-05.
+    refused(&to("w1", "sealed"), "ENV-05");
+    // draft → signed: the writer signs; the receipt verifies.
+    let s = to("w1", "signed");
+    assert!(s.status.success(), "{}", String::from_utf8_lossy(&s.stderr));
+    assert!(stdout(&s).starts_with("event_envelope w1 draft -> signed"));
+    // signed → draft: one-way, ENV-05.
+    refused(&to("w1", "draft"), "ENV-05");
+    // signed → sealed.
+    let s = to("w1", "sealed");
+    assert!(s.status.success(), "{}", String::from_utf8_lossy(&s.stderr));
+    // sealed → anything: ENV-07; sealed → anchored: ENV-08 (Stage 3).
+    refused(&to("w1", "signed"), "ENV-07");
+    refused(&to("w1", "anchored"), "ENV-08");
+    // Unknown event_id: an error, not a receipt.
+    assert_eq!(to("missing", "signed").status.code(), Some(1));
+
+    let envs = ledger_envelopes(&dir);
+    let states: Vec<&str> = envs
+        .iter()
+        .map(|e| e["lifecycle"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["draft", "signed", "sealed"]);
+    assert!(envs[0]["signature"].is_null());
+    assert_eq!(
+        envs[1]["signature"], envs[2]["signature"],
+        "sealing keeps the signature"
+    );
+    assert_eq!(envs[0]["cid"], envs[2]["cid"]);
+    let check = run(&dir, &["rws", "check"]);
+    assert!(check.status.success(), "{}", stdout(&check));
+    assert!(
+        stdout(&check).contains("refusals recorded: 4"),
+        "{}",
+        stdout(&check)
     );
     fs::remove_dir_all(dir).ok();
 }

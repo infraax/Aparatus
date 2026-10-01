@@ -12,6 +12,7 @@ One project = one append-only, hash-chained receipt ledger + a content-addressed
 | M2 | Keep agreements (K-01), solo mandate_holder, correction/review, writer lock | `docs/milestones/M2.md` |
 | M3 | `apparatusd`: JSONL RPC on a Unix socket, one writer actor, tickets | `docs/milestones/M3.md` |
 | Envelope 0 | `event_envelope` receipt kind: provenance + lifecycle enums, CID v1/BLAKE3, Ed25519 + ML-DSA-65 stub (NAP-corpus #12) | `docs/milestones/ENVELOPE-STAGE-0.md` |
+| Envelope 1 | Lifecycle draft→signed→sealed enforced, provenance rules, one CID per payload (duplicates as references) (NAP-corpus #13) | `docs/milestones/ENVELOPE-STAGE-1.md` |
 | M4 | **Next** — ingest drop-pipeline, health signals, replica backup, hook trait | `docs/handoff/M4-HANDOFF.md` |
 
 Open items per milestone: `docs/notes/M*-DEFERRED.md`.
@@ -34,7 +35,7 @@ apparatusd --project .                    # optional: always-on daemon; the CLI 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                    # 71 tests at Envelope Stage 0
+cargo test --workspace                    # 81 tests at Envelope Stage 1
 just daemon .                             # restart loop around apparatusd
 ```
 

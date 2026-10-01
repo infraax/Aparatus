@@ -330,6 +330,8 @@ fn envelopes_over_rpc_signed_by_the_daemon_and_refused_on_chain() {
             source: "agent:planner".into(),
             module: "dexos.plan".into(),
             provenance: ProvenanceKind::Inferred,
+            evidence_tag: None,
+            source_ref: Some("planner:run-1".into()),
             event_id: None,
             unix_timestamp: None,
             lifecycle: None,
@@ -363,6 +365,51 @@ fn envelopes_over_rpc_signed_by_the_daemon_and_refused_on_chain() {
     let check = cli(&dir, &["rws", "check"]);
     assert!(check.status.success(), "{}", out(&check));
     assert!(out(&check).contains("refusals recorded: 1"));
+    assert!(terminate(daemon).success());
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn event_envelope_advance_over_rpc_and_sealed_refusal() {
+    use apparatus_types::rws::{Lifecycle, ProvenanceKind, SignatureScheme};
+    let dir = solo_project("adv");
+    let daemon = start(&dir);
+    let mut c = client(&dir);
+    let draft = c
+        .call(&as_owner(Op::EventEnvelope {
+            payload: serde_json::json!({ "step": "plan" }),
+            source: "agent:planner".into(),
+            module: "dexos.plan".into(),
+            provenance: ProvenanceKind::Stated,
+            evidence_tag: None,
+            source_ref: None,
+            event_id: Some("rpc-1".into()),
+            unix_timestamp: None,
+            lifecycle: Some(Lifecycle::Draft),
+            signature_scheme: SignatureScheme::Ed25519,
+            payload_hash: None,
+            cid: None,
+        }))
+        .unwrap();
+    assert_eq!(draft.status, Status::Ok, "{draft:?}");
+    for to in [Lifecycle::Signed, Lifecycle::Sealed] {
+        let r = c
+            .call(&as_owner(Op::EventEnvelopeAdvance {
+                event_id: "rpc-1".into(),
+                to,
+            }))
+            .unwrap();
+        assert_eq!(r.status, Status::Ok, "{to:?}: {r:?}");
+    }
+    let again = c
+        .call(&as_owner(Op::EventEnvelopeAdvance {
+            event_id: "rpc-1".into(),
+            to: Lifecycle::Signed,
+        }))
+        .unwrap();
+    assert_eq!(again.status, Status::Refused);
+    assert_eq!(again.rule.as_deref(), Some("ENV-07"));
+    assert_eq!(again.lines.len(), 1, "the refusal receipt");
     assert!(terminate(daemon).success());
     std::fs::remove_dir_all(dir).ok();
 }

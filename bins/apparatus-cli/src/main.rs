@@ -252,13 +252,23 @@ enum Rws {
         /// Inline JSON payload.
         #[arg(long)]
         data: Option<String>,
-        #[arg(long)]
-        source: String,
-        #[arg(long)]
-        module: String,
+        #[arg(long, required_unless_present = "to")]
+        source: Option<String>,
+        #[arg(long, required_unless_present = "to")]
+        module: Option<String>,
         /// stated | measured | inferred
-        #[arg(long, value_parser = parse_enum::<ProvenanceKind>)]
-        provenance: ProvenanceKind,
+        #[arg(long, required_unless_present = "to", value_parser = parse_enum::<ProvenanceKind>)]
+        provenance: Option<ProvenanceKind>,
+        /// Move an existing `--event-id` to this lifecycle (signed | sealed); the writer
+        /// reuses the stored envelope and signs when leaving draft.
+        #[arg(long, requires = "event_id", conflicts_with_all = ["payload", "data", "source", "module", "provenance", "lifecycle"], value_parser = parse_enum::<Lifecycle>)]
+        to: Option<Lifecycle>,
+        /// A | B | C | E | NF (required for measured).
+        #[arg(long, value_parser = parse_enum::<EvidenceTag>)]
+        evidence_tag: Option<EvidenceTag>,
+        /// Source reference (required for inferred).
+        #[arg(long)]
+        source_ref: Option<String>,
         /// Default: a fresh UUIDv7.
         #[arg(long)]
         event_id: Option<String>,
@@ -716,12 +726,28 @@ fn to_request(cmd: Rws) -> Result<Request> {
             source,
             module,
             provenance,
+            evidence_tag,
+            source_ref,
             event_id,
             unix_timestamp,
             lifecycle,
             scheme,
+            to,
             signing,
         } => {
+            if let Some(to) = to {
+                return Ok(req(
+                    &signing,
+                    Op::EventEnvelopeAdvance {
+                        event_id: event_id.expect("clap requires --event-id with --to"),
+                        to,
+                    },
+                ));
+            }
+            let (Some(source), Some(module), Some(provenance)) = (source, module, provenance)
+            else {
+                anyhow::bail!("--source, --module and --provenance are required without --to");
+            };
             let text = match (payload, data) {
                 (_, Some(d)) => d,
                 (Some(p), None) if p.as_os_str() == "-" => {
@@ -742,6 +768,8 @@ fn to_request(cmd: Rws) -> Result<Request> {
                     source,
                     module,
                     provenance,
+                    evidence_tag,
+                    source_ref,
                     event_id,
                     unix_timestamp,
                     lifecycle,

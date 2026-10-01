@@ -9,7 +9,9 @@ use apparatus_crypto::signing::{
     ed25519_verify, frame_message, from_hex, key_id, ml_dsa_65_stub_verify, to_hex,
 };
 use apparatus_crypto::{canonical_json, CanonicalError, Cid, CidCodec, Sha256Digest, SigningKey};
-use apparatus_types::rws::{EnvelopeSignature, EventEnvelope, Lifecycle, SignatureScheme};
+use apparatus_types::rws::{
+    EnvelopeSignature, EventEnvelope, Lifecycle, ProvenanceKind, SignatureScheme,
+};
 use serde_json::Value;
 
 /// Domain tag in front of every envelope signature (NAP T6 D.3 framing).
@@ -95,12 +97,15 @@ pub fn verify(env: &EventEnvelope) -> bool {
 }
 
 /// Stateless envelope rules. A violation becomes a refused receipt on the chain.
+/// Chain rules (ENV-05 transitions, ENV-07 sealed) live in `State::check_envelope`.
 ///
 /// - ENV-01 required fields: `event_id`, `source`, `module` non-empty; `unix_timestamp` > 0.
+/// - ENV-06 provenance: `measured` needs `evidence_tag`; `inferred` needs a non-empty `source_ref`.
 /// - ENV-02 payload: canonical JSON (no floats), at most `MAX_INLINE_PAYLOAD` bytes.
 /// - ENV-03 `payload_hash` and `cid` match the canonical payload bytes.
 /// - ENV-04 lifecycle vs signature: `draft` carries none; every later state
 ///   carries one that verifies under `signature_scheme`.
+/// - ENV-08 `anchored` is refused: anchoring is Stage 3 (#15).
 pub fn validate(env: &EventEnvelope) -> Result<(), ValidationError> {
     for (field, value) in [
         ("event_id", &env.event_id),
@@ -155,6 +160,24 @@ pub fn validate(env: &EventEnvelope) -> Result<(), ValidationError> {
             }
         }
     }
+    match env.provenance {
+        ProvenanceKind::Measured if env.evidence_tag.is_none() => {
+            return Err(rule(
+                "ENV-06",
+                "measured provenance needs an evidence_tag (A, B, C, E or NF)",
+            ));
+        }
+        ProvenanceKind::Inferred if env.source_ref.as_deref().unwrap_or("").trim().is_empty() => {
+            return Err(rule("ENV-06", "inferred provenance needs a source_ref"));
+        }
+        _ => {}
+    }
+    if env.lifecycle == Lifecycle::Anchored {
+        return Err(rule(
+            "ENV-08",
+            "anchoring is Stage 3; an envelope cannot be anchored yet",
+        ));
+    }
     Ok(())
 }
 
@@ -162,7 +185,7 @@ pub fn validate(env: &EventEnvelope) -> Result<(), ValidationError> {
 mod tests {
     use super::*;
     use apparatus_crypto::{Ed25519Key, MlDsa65Stub};
-    use apparatus_types::rws::ProvenanceKind;
+    use apparatus_types::rws::EvidenceTag;
 
     fn draft(payload: Value) -> EventEnvelope {
         let bytes = payload_bytes(&payload).unwrap();
@@ -173,9 +196,12 @@ mod tests {
             source: "sensor".into(),
             module: "dexos.test".into(),
             provenance: ProvenanceKind::Measured,
+            evidence_tag: Some(EvidenceTag::C),
+            source_ref: None,
             payload,
             payload_hash,
             cid,
+            duplicate_of: None,
             lifecycle: Lifecycle::Draft,
             signature_scheme: SignatureScheme::Ed25519,
             signature: None,

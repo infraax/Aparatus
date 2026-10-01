@@ -5,7 +5,8 @@
 //!
 //! Tools are read-only: `chain_head` (apparatusd RPC `head`), `ic_status` (replica status
 //! through ic-agent, nothing written), `quarantine_scan` (parse the lockfiles, count pins,
-//! no network, nothing written). No install_code, no setAnker, no key export. apparatusd
+//! no network, nothing written), `access_keys_describe` (vault descriptions, never a secret)
+//! and `node_status` (one node record by id). No install_code, no setAnker, no key export. apparatusd
 //! stays the only writer of the chain.
 
 use anyhow::Result;
@@ -43,6 +44,12 @@ impl Gate for CanisterGate {
 pub struct Ctx {
     pub project: PathBuf,
     pub replica_url: String,
+    /// The access-keys vault (descriptions only), if configured.
+    pub vault: Option<String>,
+    /// The node-status canister, if configured.
+    pub node_status: Option<String>,
+    /// Key the bridge signs caller-checked queries with (the anker key).
+    pub key: Option<PathBuf>,
 }
 
 struct ToolDef {
@@ -63,10 +70,48 @@ const TOOLS: &[ToolDef] = &[
         name: "quarantine_scan",
         description: "Parse the project's lockfiles and count the pinned packages. Read-only; no network; never rewrites a lockfile.",
     },
+    ToolDef {
+        name: "access_keys_describe",
+        description: "List the access-keys vault items: id, description, sealed size. Never a secret, sealed or not.",
+    },
+    ToolDef {
+        name: "node_status",
+        description: "Read one node record by id (argument `id`): tier, RAM, disk free, arch, height, last seen. No secrets.",
+    },
 ];
 
-fn run_tool(ctx: &Ctx, name: &str) -> Result<String> {
+fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<String> {
     match name {
+        "access_keys_describe" => {
+            let v = ctx
+                .vault
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("no --vault configured"))?;
+            Ok(apparatus_ic::query_text(
+                &ctx.replica_url,
+                None,
+                v,
+                "describeText",
+                None,
+            )?)
+        }
+        "node_status" => {
+            let c = ctx
+                .node_status
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("no --node-status configured"))?;
+            let id = args
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("argument `id` (string) is required"))?;
+            Ok(apparatus_ic::query_text(
+                &ctx.replica_url,
+                ctx.key.as_deref(),
+                c,
+                "describeNode",
+                Some(id),
+            )?)
+        }
         "chain_head" => chain_head(&ctx.project),
         "ic_status" => {
             let s = apparatus_ic::status(&ctx.replica_url)?;
@@ -138,7 +183,11 @@ pub fn handle(gate: &dyn Gate, ctx: &Ctx, msg: &Value) -> Option<Value> {
         "tools/list" => ok(json!({"tools": TOOLS.iter().map(|t| json!({
             "name": t.name,
             "description": t.description,
-            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
+            "inputSchema": if t.name == "node_status" {
+                json!({"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"], "additionalProperties": false})
+            } else {
+                json!({"type": "object", "properties": {}, "additionalProperties": false})
+            }
         })).collect::<Vec<_>>()})),
         "tools/call" => {
             let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -157,7 +206,7 @@ pub fn handle(gate: &dyn Gate, ctx: &Ctx, msg: &Value) -> Option<Value> {
                             true,
                         ))
                     } else {
-                        match run_tool(ctx, name) {
+                        match run_tool(ctx, name, &args) {
                             Ok(out) => ok(text(out, false)),
                             Err(e) => ok(text(format!("tool {name} failed: {e:#}"), true)),
                         }
@@ -227,6 +276,9 @@ mod tests {
         Ctx {
             project: project.to_path_buf(),
             replica_url: url.to_string(),
+            vault: None,
+            node_status: None,
+            key: None,
         }
     }
 
@@ -256,7 +308,16 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(names, ["chain_head", "ic_status", "quarantine_scan"]);
+        assert_eq!(
+            names,
+            [
+                "chain_head",
+                "ic_status",
+                "quarantine_scan",
+                "access_keys_describe",
+                "node_status"
+            ]
+        );
         assert!(handle(
             &g,
             &c,

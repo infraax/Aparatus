@@ -64,3 +64,41 @@ daemon). Local mode needs that lock, so every CLI call above went over the socke
 `01a0f7d0-c852-70c8-b8fa-28ee8fffc876 55ab712f937add99a08f1f72fa4e102567767e217f195e03f507844d04df591c`, 9 receipts.
 After restart, `rws check`: `chain ok: 9 receipts`, `refusals recorded: 1`, `check ok`.
 Daemon log: `listening … (4 receipts)` → stop → `listening … (9 receipts)` → stop; both stops exit 0.
+
+## Part 3 — ENV-09 on the paths the CLI cannot reach
+
+The writer always sets `duplicate_of`, so ENV-09 is only reachable by receipts that bypass it.
+Crafted line: a copy of a real `draft` envelope `imp-1` (so no signature is involved), with `event_id: "imp-2"`,
+a new receipt id, the same payload/CID, and `duplicate_of: "nobody"`.
+
+```bash
+S=/home/user/apv-imp
+apparatus --project $S-src rws init --solo
+apparatus --project $S-src rws event-envelope --data '{"temp_c":21}' --source sensor:bme280 --module dexos.climate \
+  --provenance measured --evidence-tag A --event-id imp-1 --lifecycle draft
+# $S/rws/receipts.jsonl = the 5 lines of $S-src/.apparatus/ledger.jsonl + the crafted line 6
+#   (previous_receipt_id/previous_hash null, so import fills the link)
+apparatus --project $S rws import-jsonl $S/rws/receipts.jsonl
+```
+
+```text
+error: refused: line 6: ENV-09: cid bafkr4iew3jsqb5br6pu65svhs3aerz76bxbx6kvvopbxi326gjz2whgefi is already carried by event_id imp-1; set duplicate_of to it
+exit 1
+```
+
+**Finding: the refusal is not written on a chain on this path, by design.** `import-jsonl` imports only into an empty
+chain and is all-or-nothing (X-11): it dry-runs every line first and refuses the whole buffer before any append.
+Result: exit 1, no `ledger.jsonl`, buffer not frozen. ENV-09 fired; there is no chain to record it on. Changing that
+would extend the import rules, which this validation does not do.
+Side effect seen (pre-existing, not Stage 1): the refused import leaves `.apparatus/project.json`, `LOCK` and `cas/`
+in the target directory. A later import into it then fails on the empty-chain check, not on ENV-09.
+
+Replay path, same crafted line appended directly to a copy of `$S-src` with a correct `previous_hash` and `HEAD`:
+
+```text
+$ apparatus --project $S rws check
+FAIL chain: integrity: line 6 replays as illegal: ENV-09: cid bafkr4iew3jsqb5br6pu65svhs3aerz76bxbx6kvvopbxi326gjz2whgefi is already carried by event_id imp-1; set duplicate_of to it
+exit 1
+```
+
+On replay ENV-09 makes the chain fail integrity: `Kernel::open` refuses to load it, so the daemon will not start on it.

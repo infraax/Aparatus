@@ -16,6 +16,8 @@ use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod mcp;
+
 #[derive(Parser, Debug)]
 #[command(name = "apparatus", version = env!("CARGO_PKG_VERSION"), about = "Apparatus local node")]
 struct Cli {
@@ -33,6 +35,25 @@ enum Commands {
     /// RWS 2.0 runtime commands.
     #[command(subcommand)]
     Rws(Rws),
+    /// MCP stdio bridge. Every tool call is checked by the mcp-gate canister first.
+    #[command(subcommand)]
+    Mcp(McpCmd),
+}
+
+#[derive(Subcommand, Debug)]
+enum McpCmd {
+    /// Serve MCP on stdin/stdout (JSON-RPC 2.0, one message per line). Read-only tools only.
+    Serve {
+        /// The mcp-gate canister id on the local replica.
+        #[arg(long)]
+        gate: String,
+        /// Key the bridge signs `check` with (the anker key; raw 32-byte seed).
+        #[arg(long, default_value = ".ic-local/anker.key")]
+        key: PathBuf,
+        /// Local replica.
+        #[arg(long, default_value = apparatus_ic::DEFAULT_URL)]
+        url: String,
+    },
 }
 
 /// Who signs: `--as <name>` (default: the project's default principal) and an optional role override.
@@ -419,6 +440,24 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
+        Commands::Mcp(McpCmd::Serve { gate, key, url }) => {
+            let key = if key.is_absolute() {
+                key
+            } else {
+                cli.project.join(key)
+            };
+            let g = mcp::CanisterGate {
+                url: url.clone(),
+                key,
+                canister: gate,
+            };
+            let ctx = mcp::Ctx {
+                project: cli.project.clone(),
+                replica_url: url,
+            };
+            mcp::serve(&g, &ctx)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Commands::Doctor => {
             println!("Apparatus Doctor");
             println!("----------------");

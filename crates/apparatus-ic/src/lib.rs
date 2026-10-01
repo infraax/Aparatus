@@ -148,6 +148,89 @@ pub fn key_principal(path: &std::path::Path) -> Result<(String, bool), String> {
     Ok((principal.to_text(), created))
 }
 
+/// Client for the `mcp-gate` canister (NAP-corpus `docs/ic/canisters/mcp-gate`). The MCP
+/// bridge asks it before every tool call; the canister records the decision as an Event.
+pub mod gate {
+    use super::{classify, IcError, TIMEOUT};
+    use candid::{CandidType, Decode, Encode};
+    use ic_agent::export::{reqwest, Principal};
+    use ic_agent::identity::BasicIdentity;
+    use ic_agent::Agent;
+    use sha2::{Digest, Sha256};
+
+    #[derive(CandidType, serde::Deserialize, Debug, PartialEq, Eq)]
+    enum Decision {
+        #[serde(rename = "allow")]
+        Allow,
+        #[serde(rename = "refuse")]
+        Refuse,
+    }
+
+    /// The gate's answer.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Verdict {
+        pub allowed: bool,
+        pub reason: String,
+        /// Lowercase hex sha256 of the arguments that were checked.
+        pub args_sha256: String,
+    }
+
+    /// `check(tool, sha256(args))` on `canister`, signed with the raw Ed25519 seed in `key`.
+    /// Local replica only: the root key is fetched from the replica itself.
+    pub fn check(
+        base: &str,
+        key: &std::path::Path,
+        canister: &str,
+        tool: &str,
+        args: &[u8],
+    ) -> Result<Verdict, IcError> {
+        let bad = |reason: String| IcError::BadResponse {
+            url: base.to_string(),
+            reason,
+        };
+        let seed: [u8; 32] = std::fs::read(key)
+            .map_err(|e| bad(format!("reading {}: {e}", key.display())))?
+            .try_into()
+            .map_err(|_| bad(format!("{} is not a 32-byte key", key.display())))?;
+        let id = Principal::from_text(canister).map_err(|e| bad(format!("canister id: {e}")))?;
+        let digest = Sha256::digest(args).to_vec();
+        let client = reqwest::Client::builder()
+            .timeout(TIMEOUT * 6)
+            .build()
+            .map_err(|e| bad(e.to_string()))?;
+        let agent = Agent::builder()
+            .with_url(base)
+            .with_http_client(client)
+            .with_identity(BasicIdentity::from_raw_key(&seed))
+            .build()
+            .map_err(|e| bad(e.to_string()))?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| bad(format!("tokio runtime: {e}")))?;
+        let out =
+            runtime
+                .block_on(async {
+                    agent.fetch_root_key().await?;
+                    agent
+                        .update(&id, "check")
+                        .with_arg(Encode!(&tool.to_string(), &digest).map_err(|e| {
+                            ic_agent::AgentError::MessageError(format!("candid: {e}"))
+                        })?)
+                        .call_and_wait()
+                        .await
+                })
+                .map_err(|e| classify(base, e))?;
+        let (decision, reason) =
+            Decode!(&out, Decision, String).map_err(|e| bad(format!("candid: {e}")))?;
+        Ok(Verdict {
+            allowed: decision == Decision::Allow,
+            reason,
+            args_sha256: super::hex(&digest),
+        })
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

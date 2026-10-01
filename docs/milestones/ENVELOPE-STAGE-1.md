@@ -79,6 +79,23 @@ bypass the writer (`rws import-jsonl`, replay of a chain on open) and is covered
 Not refusals: `--to` on an unknown `event_id` is an error (exit 1, no receipt). A clap usage error (bad flag value,
 `--to` with `--data`) also exits 2 but writes no receipt and prints no `REFUSED` line. This is the existing CLI behaviour.
 
+## Tests (71 → 81) and gates
+
+| Transition / rule | Schema test (`crates/apparatus-schema/src/rws.rs`) | End-to-end test |
+|---|---|---|
+| draft → draft, draft → signed, signed → sealed | `envelope_walks_draft_signed_sealed` | CLI `event_envelope_walks_draft_signed_sealed_via_cli`, daemon `event_envelope_advance_over_rpc_and_sealed_refusal` |
+| draft → signed needs a verifying signature; stub verifies true | `draft_to_signed_needs_a_verifying_signature` | — |
+| signed → draft / signed → signed / changed seal / draft → sealed (ENV-05) | `signed_is_one_way_and_sealing_changes_only_lifecycle` | CLI walk test |
+| sealed → any (ENV-07), anchored (ENV-08) | `sealed_objects_never_change_and_anchoring_is_refused` | CLI `sealed_event_envelope_mutation_is_refused_on_chain`, CLI walk, daemon advance |
+| provenance (ENV-06) | `provenance_needs_its_evidence` | CLI `sealed_event_envelope_mutation_is_refused_on_chain` |
+| one CID, reference (ENV-09) | `same_bytes_twice_is_one_cid_and_a_reference` | CLI `same_payload_twice_is_one_cid_stored_as_reference` |
+
+Gates on the Stage 1 head: `cargo test --workspace` 81 passed, 0 failed · `cargo clippy --workspace --all-targets -- -D warnings`
+clean · `cargo fmt --all -- --check` clean · `cargo build --workspace --locked` clean.
+
+Stage 0 tests: all 71 still pass. Three had their **inputs** extended for ENV-06 (CLI helper `--evidence-tag C`, schema
+helper `evidence_tag: Some(C)`, daemon test `source_ref`); no assertion changed.
+
 ## Not built
 
 - ML-DSA-65 / hybrid (#14); Bitcoin anchoring (#15).

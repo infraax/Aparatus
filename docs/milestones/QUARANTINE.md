@@ -47,9 +47,9 @@ The `cksum` in the crates.io index is the registry's recorded crate hash; the `.
 | Feed | Status |
 |---|---|
 | Local feed file (`--advisory-feed`, format below) | **built**; `docs/fixtures/quarantine-feed.json` is a fixture, not a real advisory |
-| OSV (`api.osv.dev`) | **not built** in this pass |
-| RustSec advisory DB | **not built** in this pass |
-| GitHub security advisories (only if a token is already in the environment) | **not built** in this pass |
+| OSV (`api.osv.dev`), live: `--osv` | **built** (2026-10-01). One `POST /v1/querybatch` for all pins (chunks of 500), then `GET /v1/vulns/<id>` per distinct id. Withdrawn advisories are skipped. `recommended` = the lowest `fixed` version above the pin |
+| RustSec advisory DB | **built, through OSV**. OSV serves the RustSec database (`RUSTSEC-*` ids); those Advice name the feed `rustsec (via osv)` and link `rustsec.org/advisories/<id>`. When OSV returns a GHSA record that a RUSTSEC record lists as an alias for the same pin, the GHSA one is dropped |
+| GitHub security advisories | **covered through OSV** (GHSA ids), no token needed. A direct GitHub API feed is not built, and no new secret is required |
 
 Feed format: `{"feed": "<name>", "advisories": [{"id", "ecosystem": "cargo"|"npm", "package", "bad_versions": [...], "recommended", "url"}]}`.
 The Advice summary names the feed, the advisory id, the bad version, the recommended version and the source URL.
@@ -92,7 +92,49 @@ advice fixture:FIXTURE-2026-0001 for cargo:lazy_static@1.5.1
 tampered `serde` lockfile above first passed with exit 0. The hash is now checked first on every scan; the CLI test
 `quarantine_hash_mismatch_is_refused_on_chain` covers it.
 
+## Live feed run (2026-10-01)
+
+`--osv` adds live advisories to the pins being scanned; `--advisory-feed` still works alongside it. Every match is **Advice only**: nothing is applied, and no lockfile is written. The checksums below are the same before and after.
+
+On this repo's own `Cargo.lock`, OSV returns two RustSec advisories:
+- `paste` 1.0.15: `RUSTSEC-2024-0436`
+- `serde_cbor` 0.11.2: `RUSTSEC-2021-0127`
+
+Both are "unmaintained" advisories. Both crates come in through ic-agent. They stay pinned, and replacing them is a later Policy decision.
+
+`docs/fixtures/osv-live/Cargo.lock` is a one-pin lockfile: `smallvec` 0.6.9 with its real crates.io checksum. The run gives four RustSec Advice records. The GHSA aliases are dropped.
+
+```text
+$ sha256sum Cargo.lock docs/fixtures/osv-live/Cargo.lock
+e3a9bf9a430a056f1a61c8dc3cb1fa3ebda2ddca640509bba23c37f7de76b902  Cargo.lock
+08cc45655066f763fb1684e02ed90116b62a970133dd0e410c502100f683b6bb  docs/fixtures/osv-live/Cargo.lock
+$ target/debug/apparatus rws quarantine --osv   # this repo, live crates.io + live OSV
+osv: 2 advisories for 300 pins
+advice rustsec (via osv):RUSTSEC-2024-0436 for cargo:paste@1.0.15
+advice rustsec (via osv):RUSTSEC-2021-0127 for cargo:serde_cbor@0.11.2
+quarantine: 300 pins, 0 adopted, 0 waiting, 0 refused, 300 already recorded, 2 advice; lockfiles not modified
+exit 0
+$ target/debug/apparatus rws quarantine --osv --lockfile docs/fixtures/osv-live/Cargo.lock   # one known-bad pin (smallvec 0.6.9, real crates.io checksum)
+osv: 4 advisories for 1 pins
+01a0f8a8-2e58-76b6-99ca-943827d0b845 event_envelope 0930a5d763530b3f4c07f9aa9f8823350eba33a28c0a677f1cb605dcf176aff5
+advice rustsec (via osv):RUSTSEC-2018-0018 for cargo:smallvec@0.6.9
+01a0f8a8-2e81-7414-9592-9fab5be3d0c6 advice 97a8034985ef79aa2047af84d3e0acd5b6788b49f44488fbfc1bc06335a56de0
+advice rustsec (via osv):RUSTSEC-2019-0009 for cargo:smallvec@0.6.9
+01a0f8a8-2e84-7543-8483-f570c76dcf61 advice ce355bfa3c8eea588a0d76d8ec74a93926e2e99d241e36ba6f1f1dd28e8e6ce4
+advice rustsec (via osv):RUSTSEC-2019-0012 for cargo:smallvec@0.6.9
+01a0f8a8-2e86-7165-8104-930aed511d12 advice ae4d0c7b3e60ac7dab2ae9d3ec66bb72f80f8ef526f5b07bafd3d6e54d15f0a8
+advice rustsec (via osv):RUSTSEC-2021-0003 for cargo:smallvec@0.6.9
+01a0f8a8-2e87-7492-8870-e5c5d2e04356 advice ff95396aea36298f1429f9e041e3a3aa9916c99039d49d5290e78eee7397b525
+quarantine: 1 pins, 1 adopted, 0 waiting, 0 refused, 0 already recorded, 4 advice; lockfiles not modified
+exit 0
+$ sha256sum -c
+Cargo.lock: OK
+docs/fixtures/osv-live/Cargo.lock: OK
+```
+
 ## Tests
+
+- `osv_batch_body_and_hits_round_trip`, `osv_record_names_feed_id_and_lowest_fix_and_dedupes_the_ghsa_alias`: the OSV request/response handling, offline, no network.
 
 - CLI: `quarantine_young_version_waits_and_keeps_previous_pin`, `quarantine_hash_mismatch_is_refused_on_chain`
   (incl. Q-02 and the adopted-pin regression), `quarantine_advisory_writes_advice_and_leaves_lockfile`,

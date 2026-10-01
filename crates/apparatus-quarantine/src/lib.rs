@@ -429,9 +429,277 @@ pub fn load_feed(path: &Path) -> Result<Vec<AdvisoryRecord>, QuarantineError> {
         .collect())
 }
 
+/// OSV (`api.osv.dev`) is the live feed. It also serves the RustSec advisory database
+/// (`RUSTSEC-*` ids), so one query covers both. Advisories become Advice; nothing is applied.
+pub const OSV_URL: &str = "https://api.osv.dev";
+
+fn osv_ecosystem(e: Ecosystem) -> &'static str {
+    match e {
+        Ecosystem::Cargo => "crates.io",
+        Ecosystem::Npm => "npm",
+    }
+}
+
+/// Body of `POST /v1/querybatch`: one query per pin.
+pub fn osv_batch_body(pins: &[LockPin]) -> serde_json::Value {
+    serde_json::json!({"queries": pins.iter().map(|p| serde_json::json!({
+        "package": {"name": p.name, "ecosystem": osv_ecosystem(p.ecosystem)},
+        "version": p.version,
+    })).collect::<Vec<_>>()})
+}
+
+/// `(pin index, vulnerability id)` for every hit in a querybatch response.
+pub fn osv_batch_hits(resp: &serde_json::Value) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (i, r) in resp
+        .get("results")
+        .and_then(|r| r.as_array())
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        for v in r
+            .get("vulns")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
+                out.push((i, id.to_string()));
+            }
+        }
+    }
+    out
+}
+
+fn version_key(v: &str) -> Vec<u64> {
+    v.split(['.', '-', '+'])
+        .map_while(|x| x.parse::<u64>().ok())
+        .collect()
+}
+
+/// One OSV vulnerability record → an `AdvisoryRecord` for `pin`, or `None` if withdrawn.
+/// `bad_versions` is the pinned version (OSV matched it). `recommended` is the lowest
+/// `fixed` version above the pin for that package, if OSV lists one.
+pub fn osv_record(pin: &LockPin, vuln: &serde_json::Value) -> Option<AdvisoryRecord> {
+    if vuln.get("withdrawn").is_some() {
+        return None;
+    }
+    let id = vuln.get("id")?.as_str()?.to_string();
+    let eco = osv_ecosystem(pin.ecosystem);
+    let current = version_key(&pin.version);
+    let mut fixed: Vec<String> = Vec::new();
+    for a in vuln
+        .get("affected")
+        .and_then(|a| a.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let pkg = a.get("package");
+        let same = pkg.and_then(|p| p.get("name")).and_then(|n| n.as_str())
+            == Some(pin.name.as_str())
+            && pkg
+                .and_then(|p| p.get("ecosystem"))
+                .and_then(|e| e.as_str())
+                == Some(eco);
+        if !same {
+            continue;
+        }
+        for r in a
+            .get("ranges")
+            .and_then(|r| r.as_array())
+            .into_iter()
+            .flatten()
+        {
+            for ev in r
+                .get("events")
+                .and_then(|e| e.as_array())
+                .into_iter()
+                .flatten()
+            {
+                if let Some(f) = ev.get("fixed").and_then(|f| f.as_str()) {
+                    if version_key(f) > current {
+                        fixed.push(f.to_string());
+                    }
+                }
+            }
+        }
+    }
+    fixed.sort_by_key(|f| version_key(f));
+    let rustsec = id.starts_with("RUSTSEC-");
+    Some(AdvisoryRecord {
+        feed: if rustsec { "rustsec (via osv)" } else { "osv" }.to_string(),
+        url: if rustsec {
+            format!("https://rustsec.org/advisories/{id}")
+        } else {
+            format!("https://osv.dev/vulnerability/{id}")
+        },
+        id,
+        ecosystem: pin.ecosystem,
+        package: pin.name.clone(),
+        bad_versions: vec![pin.version.clone()],
+        recommended: fixed.into_iter().next(),
+    })
+}
+
+/// Drop a non-RustSec id when a RustSec advisory for the same pin lists it as an alias
+/// (OSV returns both the GHSA and the RUSTSEC record for one Rust vulnerability).
+pub fn osv_dedupe(records: Vec<(AdvisoryRecord, Vec<String>)>) -> Vec<AdvisoryRecord> {
+    let keep: Vec<bool> = records
+        .iter()
+        .map(|(r, _)| {
+            r.id.starts_with("RUSTSEC-")
+                || !records.iter().any(|(o, aliases)| {
+                    o.id.starts_with("RUSTSEC-")
+                        && o.package == r.package
+                        && o.bad_versions == r.bad_versions
+                        && aliases.contains(&r.id)
+                })
+        })
+        .collect();
+    records
+        .into_iter()
+        .zip(keep)
+        .filter(|(_, k)| *k)
+        .map(|((r, _), _)| r)
+        .collect()
+}
+
+/// Live OSV advisories for `pins`: one querybatch (in chunks of 500), then one record fetch
+/// per distinct id. Network only; never writes a lockfile.
+pub fn osv_advisories(pins: &[LockPin]) -> Result<Vec<AdvisoryRecord>, QuarantineError> {
+    let net = |reason: String| QuarantineError::Read {
+        path: OSV_URL.into(),
+        reason,
+    };
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent("apparatus-quarantine/0.1 (+https://github.com/infraax/Aparatus)")
+        .build()
+        .map_err(|e| net(e.to_string()))?;
+    let mut hits = Vec::new();
+    for (c, chunk) in pins.chunks(500).enumerate() {
+        let text = client
+            .post(format!("{OSV_URL}/v1/querybatch"))
+            .header("content-type", "application/json")
+            .body(osv_batch_body(chunk).to_string())
+            .send()
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.text())
+            .map_err(|e| net(e.to_string()))?;
+        let resp: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| net(e.to_string()))?;
+        hits.extend(
+            osv_batch_hits(&resp)
+                .into_iter()
+                .map(|(i, id)| (c * 500 + i, id)),
+        );
+    }
+    let mut vulns: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    for (_, id) in &hits {
+        if !vulns.contains_key(id) {
+            let text = client
+                .get(format!("{OSV_URL}/v1/vulns/{id}"))
+                .send()
+                .and_then(|r| r.error_for_status())
+                .and_then(|r| r.text())
+                .map_err(|e| net(e.to_string()))?;
+            let v: serde_json::Value =
+                serde_json::from_str(&text).map_err(|e| net(e.to_string()))?;
+            vulns.insert(id.clone(), v);
+        }
+    }
+    let records = hits
+        .iter()
+        .filter_map(|(i, id)| {
+            let v = &vulns[id];
+            let aliases = v
+                .get("aliases")
+                .and_then(|a| a.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            osv_record(&pins[*i], v).map(|r| (r, aliases))
+        })
+        .collect();
+    Ok(osv_dedupe(records))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pin(name: &str, version: &str) -> LockPin {
+        LockPin {
+            ecosystem: Ecosystem::Cargo,
+            name: name.into(),
+            version: version.into(),
+            integrity: "00".into(),
+            lockfile: "Cargo.lock".into(),
+        }
+    }
+
+    #[test]
+    fn osv_batch_body_and_hits_round_trip() {
+        let pins = [pin("smallvec", "0.6.9"), pin("serde", "1.0.200")];
+        let body = osv_batch_body(&pins);
+        assert_eq!(body["queries"][0]["package"]["ecosystem"], "crates.io");
+        assert_eq!(body["queries"][1]["version"], "1.0.200");
+        let resp = serde_json::json!({"results": [
+            {"vulns": [{"id": "GHSA-mm7v-vpv8-xfc3"}, {"id": "RUSTSEC-2019-0009"}]},
+            {}
+        ]});
+        assert_eq!(
+            osv_batch_hits(&resp),
+            vec![
+                (0, "GHSA-mm7v-vpv8-xfc3".to_string()),
+                (0, "RUSTSEC-2019-0009".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn osv_record_names_feed_id_and_lowest_fix_and_dedupes_the_ghsa_alias() {
+        let p = pin("smallvec", "0.6.9");
+        let rustsec = serde_json::json!({
+            "id": "RUSTSEC-2019-0009", "aliases": ["CVE-2019-15551", "GHSA-mm7v-vpv8-xfc3"],
+            "affected": [{"package": {"name": "smallvec", "ecosystem": "crates.io"},
+                          "ranges": [{"events": [{"introduced": "0.6.5"}, {"fixed": "0.6.10"}]},
+                                     {"events": [{"introduced": "0"}, {"fixed": "0.6.3"}]}]}]
+        });
+        let ghsa = serde_json::json!({"id": "GHSA-mm7v-vpv8-xfc3", "aliases": ["RUSTSEC-2019-0009"],
+            "affected": [{"package": {"name": "smallvec", "ecosystem": "crates.io"},
+                          "ranges": [{"events": [{"fixed": "0.6.10"}]}]}]});
+        let r = osv_record(&p, &rustsec).unwrap();
+        assert_eq!(r.feed, "rustsec (via osv)");
+        assert_eq!(r.id, "RUSTSEC-2019-0009");
+        assert_eq!(r.bad_versions, vec!["0.6.9"]);
+        assert_eq!(
+            r.recommended.as_deref(),
+            Some("0.6.10"),
+            "0.6.3 is below the pin"
+        );
+        assert_eq!(r.url, "https://rustsec.org/advisories/RUSTSEC-2019-0009");
+        let g = osv_record(&p, &ghsa).unwrap();
+        assert_eq!(g.feed, "osv");
+        let kept = osv_dedupe(vec![
+            (g, vec!["RUSTSEC-2019-0009".into()]),
+            (
+                r,
+                vec!["CVE-2019-15551".into(), "GHSA-mm7v-vpv8-xfc3".into()],
+            ),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "RUSTSEC-2019-0009");
+        assert!(osv_record(
+            &p,
+            &serde_json::json!({"id": "X", "withdrawn": "2024-01-01T00:00:00Z"})
+        )
+        .is_none());
+    }
 
     #[test]
     fn cargo_lock_keeps_registry_pins_only() {

@@ -6,6 +6,8 @@ Dit bestand is de brug tussen de research in `infraax/NAP-corpus` en de runtime 
 
 De repo bevat zes NAP-tracks (post-quantum crypto, ICP-subnet, netwerktopologie, LoRa/mesh, autonomous LLM hosting, corpus-schema), RWS-source-dossiers (Stage 0–2), Reticulum- en RF-sensing-research, dependency-management, en de RWS 2.0 blueprint. Alles is bronarchief: geen conclusies, alleen feiten met tags [A]/[B]/[C]/[NF].
 
+Full canon is on `main` as of `4e251a8` (2026-10-01). Tracks T0–T6 are in `01-nap-tracks/`.
+
 Belangrijke docs:
 
 - `docs/ic/ROADMAP.md` — de volgorde: PoC eerst, apparatus pas als laatste fase
@@ -14,8 +16,9 @@ Belangrijke docs:
 - `docs/ic/MINI-GOVERNANCE.md` — proposal → vote → upgrade zonder tokens
 - `docs/ic/VETKEYS-SPIKE.md` — vetKeys voor agent-identiteit
 - `docs/ic/RWS-IC-MAPPING.md` — RWS-regels → IC-mechanismen
+- `01-nap-tracks/X-icp-sovereign-subnet-part-c.md` — de 2026 feasibility-studie (stale; re-verify)
 
-Issues: #12–#19 (envelope stages, IC-research, canister-selectie, PoC, RWS-mapping).
+Issues: #1–#6 en #12–#19.
 
 ## 2. Wat is er al in Aparatus (M0–M3)
 
@@ -60,13 +63,30 @@ Envelope Stage 2 (ML-DSA) ──► Envelope Stage 3 (Bitcoin)
 - ML-DSA-implementatie (Stage 2) — de stub volstaat; verificatie geeft bewust `true` terug
 - Mesh-nodes als stemmers op operationele proposals — alleen op netwerk-proposals
 - volledige NNS-nabouw — alleen het proposal-stem-upgrade-patroon
+- Path A extractie (12–24 manmaanden) — niet voor de MVP
 
-## 6. Voor de volgende sessie
+## 6. Barebones IC — testen wanneer we er klaar voor zijn
 
-1. Lees dit bestand + `NAP-corpus/docs/ic/ROADMAP.md`
-2. Begin met Envelope Stage 0 (#12 in NAP-corpus)
-3. Daarna M4 (ingest-pijp) of IC PoC (#18) — naar keuze, maar niet allebei tegelijk
-4. Elke upgrade: check of een corpus-element erbij kan (hook, type, of module) zonder de runtime te breken
+Niet de eerste taak. Wel een verplichte check in dezelfde sessie, nadat Envelope Stage 0 groen is, of als een aparte vervolgsessie.
+
+Geselecteerde set (niet uitbreiden):
+
+- Path B: stock `ic-replica` + `orchestrator` uit `dfinity/ic`, operator LocalStore, bootstrap via `ic-prep`. Geen extractie, geen PocketIC als fundament, geen CFT.
+- N=1 eerst (dev, f=0). Alleen opschalen naar N=4 of N=7 als N=1 boot.
+- Runtime-disable via `SubnetFeatures`: geen bitcoin, geen NNS-canisters (governance, cmc, ledger, sns-wasm). `http_requests` aan laten.
+- Canister-kandidaten, pas na een boot: heartbeat/notaris, identiteitsregister, mini-governance, mesh-telemetrie. Niet allemaal in de eerste run.
+- Bobcats en LilyGo's zijn geen IC-nodes.
+
+Bronnen: `NAP-corpus/docs/ic/BAREBONES-REPLICA.md`, `docs/ic/CANISTER-MATRIX.md`, `01-nap-tracks/X-icp-sovereign-subnet-part-c.md`, issues #1, #16, #18.
+
+Als de omgeving het toelaat (Rust, disk, geen verboden netwerk): probeer N=1 te booten en schrijf het resultaat naar `NAP-corpus/docs/ic/POC-NOTES.md` (versie, commando's, of het faalt en waarom). Boot niet forceren door te strippen. Geen apparatus-koppeling in die run.
+
+## 7. Voor de volgende sessie
+
+1. Lees dit bestand + `NAP-corpus/docs/ic/ROADMAP.md` + `01-nap-tracks/T1-post-quantum-primitives.md` en `T6-corpus-schema-entry-spec.md`
+2. Begin met Envelope Stage 0 (#12)
+3. Daarna de barebones-IC check uit §6, of M4 — niet allebei als hoofddoel
+4. Elke upgrade: check of een corpus-element erbij kan zonder de runtime te breken
 
 ---
 

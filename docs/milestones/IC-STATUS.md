@@ -143,3 +143,17 @@ height-500 checkpoint in `.ic-local/run`.
 Tests: CLI `ic_status_records_height_once_and_refuses_when_down` (HTTP stub at a fixed height: second read is
 `duplicate_of`; closed port → IC-01, exit 2); daemon `ic_status_over_rpc_duplicate_and_refusals` (duplicate, new
 height, IC-01, IC-02 over the socket). 85 → 87.
+
+## Second-person check: fresh clone
+
+```bash
+git clone --branch claude/ic-status https://github.com/infraax/Aparatus && cd Aparatus
+scripts/ic-up.sh        # fresh download + verify + ic-prep + config + start: 10 s
+scripts/dev-up.sh       # build (--locked) + rws init --solo + apparatusd: 61 s
+target/debug/apparatus rws ic status
+scripts/dev-down.sh && scripts/ic-down.sh
+```
+
+Run 2026-10-01 at `d948bfa` in an empty directory (new IC download, new chain):
+`ic status http://127.0.0.1:8080/api/v2/status healthy certified_height 142` → one `event_envelope` receipt;
+`rws check` → `chain ok: 5 receipts`, `check ok`; both processes stopped cleanly.

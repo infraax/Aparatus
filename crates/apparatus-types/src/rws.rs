@@ -193,8 +193,9 @@ pub struct Payload {
     pub body: Body,
 }
 
-/// The payload kinds: the eleven of RWS-2.0 X-02 plus `envelope` (NAP-corpus #12,
+/// The payload kinds: the eleven of RWS-2.0 X-02 plus `event_envelope` (NAP-corpus #12,
 /// Envelope Stage 0; within the "~12" limit of RWS-2.0-MAPPING §2). No others exist.
+/// Not `envelope`: in RWS 2.0 that word is the means envelope (O-09).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Body {
@@ -209,7 +210,7 @@ pub enum Body {
     Event(Event),
     Correction(Correction),
     Review(Review),
-    Envelope(EventEnvelope),
+    EventEnvelope(EventEnvelope),
 }
 
 impl Body {
@@ -227,7 +228,7 @@ impl Body {
             Body::Event(_) => "event",
             Body::Correction(_) => "correction",
             Body::Review(_) => "review",
-            Body::Envelope(_) => "envelope",
+            Body::EventEnvelope(_) => "event_envelope",
         }
     }
 }
@@ -691,7 +692,7 @@ mod tests {
 
     #[test]
     fn envelope_kind_and_enums_on_the_wire() {
-        let p = payload(Body::Envelope(EventEnvelope {
+        let p = payload(Body::EventEnvelope(EventEnvelope {
             event_id: "e1".into(),
             unix_timestamp: 1,
             source: "sensor".into(),
@@ -705,7 +706,7 @@ mod tests {
             signature: None,
         }));
         let v = serde_json::to_value(&p).unwrap();
-        assert_eq!(v["kind"], "envelope");
+        assert_eq!(v["kind"], "event_envelope");
         assert_eq!(v["provenance"], "measured");
         assert_eq!(v["lifecycle"], "draft");
         assert_eq!(v["signature_scheme"], "ml_dsa_65_stub");
@@ -717,6 +718,10 @@ mod tests {
         let mut bad = v;
         bad["lifecycle"] = "frozen".into();
         assert!(serde_json::from_value::<Payload>(bad).is_err());
+        // `envelope` is the RWS means envelope, never a receipt kind.
+        let mut old = serde_json::to_value(&p).unwrap();
+        old["kind"] = "envelope".into();
+        assert!(serde_json::from_value::<Payload>(old).is_err());
     }
 
     #[test]

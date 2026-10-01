@@ -570,7 +570,7 @@ fn parallel_ingests_never_corrupt_the_chain() {
 fn envelope(dir: &Path, extra: &[&str]) -> Output {
     let mut args = vec![
         "rws",
-        "envelope",
+        "event-envelope",
         "--source",
         "sensor:bme280",
         "--module",
@@ -589,7 +589,7 @@ fn ledger_envelopes(dir: &Path) -> Vec<serde_json::Value> {
         .lines()
         .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
         .map(|r| r["operation_payload"].clone())
-        .filter(|p| p["kind"] == "envelope")
+        .filter(|p| p["kind"] == "event_envelope")
         .collect()
 }
 
@@ -610,8 +610,11 @@ fn envelope_receipts_signed_stub_and_draft() {
         String::from_utf8_lossy(&signed.stderr)
     );
     let text = stdout(&signed);
-    assert!(text.starts_with("envelope evt-1 cid bafkr4i"), "{text}");
-    assert!(text.lines().last().unwrap().contains(" envelope "));
+    assert!(
+        text.starts_with("event_envelope evt-1 cid bafkr4i"),
+        "{text}"
+    );
+    assert!(text.lines().last().unwrap().contains(" event_envelope "));
 
     let stub = envelope(
         &dir,

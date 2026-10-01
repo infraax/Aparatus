@@ -1,14 +1,18 @@
 # Envelope Stage 0 — notes and deferred
 
-## Decisions the owner should confirm
+## Owner decisions (locked 2026-10-01)
 
-- **Twelfth receipt kind.** `Agents.md` and RWS-2.0-MAPPING §2 say "11 kinds; adding a kind changes RWS 2.0 itself".
-  `envelope` was added on the owner's brief (#12), inside the MAPPING's "~12" limit. `Agents.md` now says twelve.
-  RWS-2.0 X-02 in `infraax/delta` is not edited from here.
-- **Name collision.** In RWS 2.0 "envelope" already means a means envelope (O-09: `policy envelope`, `envelope_ref`).
-  The new kind is wire-named `envelope` as the brief asks; the Rust type is `EventEnvelope`.
-  If the kind should be `event_envelope`, rename **before** any real chain carries it: after that, a rename breaks replay.
-- **Payload canonical form.** See disagreement 1. CID codec is `raw` (0x55) because the bytes are canonical JSON, not CBOR.
+- **Twelfth receipt kind: `event_envelope`.** RWS-2.0 X-02 lists eleven kinds and RWS-2.0-MAPPING §2 says adding one
+  changes RWS 2.0 itself. `event_envelope` is the twelfth, added on the owner's brief (#12), inside the MAPPING's "~12" limit.
+  Recorded here only; `infraax/delta` RWS-2.0.md is **not** edited.
+- **Renamed from `envelope` before any real chain carried it.** In RWS 2.0 "envelope" is the means envelope
+  (O-09: `policy envelope`, `envelope_ref`). Kind, RPC op and CLI are now `event_envelope` / `rws event-envelope`;
+  the Rust type stays `EventEnvelope`. A payload with kind `envelope` is refused at decode (X-05.1).
+- **Canonical form stays canonical JSON** (the ledger's X-04 form) for `payload_hash`, `cid` and signing bytes.
+  CBOR vs JCS stays open (disagreement 1). CID codec is `raw` (0x55) because the bytes are canonical JSON, not CBOR.
+- **No ingest → event_envelope.** Stays deferred to the M4 ingest pipe.
+- **No replica wiring.** Aparatus has no IC client. Facts a later hook would use are in
+  `infraax/NAP-corpus` `docs/ic/HOOKS.md` (replica address, `/api/v2/status`, binary names, checksums).
 
 ## Disagreements: ENVELOP.md vs T6 (ENVELOP.md followed, no third schema)
 
@@ -28,10 +32,9 @@
 
 ## Differences from issue #12's text
 
-- "`rws envelope` already present as placeholder": it was not; `rws policy envelope` (means) exists. `rws envelope` is new.
+- "`rws envelope` already present as placeholder": it was not; `rws policy envelope` (means) exists. The new command is `rws event-envelope`.
 - "Ed25519 implementation (existing)": none existed. Added `ed25519-dalek` 2.x, `blake3` 1.8, `getrandom` 0.4 (already in the lock via uuid).
-- "Every ingest produces an envelope receipt": **not built.** It changes `rws ingest` output and receipt counts and
-  overlaps the M4 ingest pipe. Deferred to M4 / Stage 1.
+- "Every ingest produces an envelope receipt": **not built**, by owner decision. Deferred to the M4 ingest pipe.
 
 ## Deferred
 

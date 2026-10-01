@@ -225,7 +225,7 @@ pub enum Op {
     /// Record an event envelope (NAP-corpus #12, Stage 0). The writer computes
     /// `payload_hash`, `cid` and the signature unless the client states them;
     /// stated values are checked, and a bad envelope is a refusal on the chain.
-    Envelope {
+    EventEnvelope {
         payload: serde_json::Value,
         source: String,
         module: String,
@@ -1070,7 +1070,7 @@ fn write(
                 }),
             )?)
         }
-        Op::Envelope {
+        Op::EventEnvelope {
             payload,
             source,
             module,
@@ -1111,8 +1111,8 @@ fn write(
                 }
                 .map_err(|e| anyhow!(e))?;
             }
-            let cid_line = format!("envelope {} cid {}", env.event_id, env.cid);
-            let result = k.submit(signer, role, None, vec![], Body::Envelope(env))?;
+            let cid_line = format!("event_envelope {} cid {}", env.event_id, env.cid);
+            let result = k.submit(signer, role, None, vec![], Body::EventEnvelope(env))?;
             Ok((vec![cid_line], vec![result]))
         }
         Op::Head

@@ -245,7 +245,7 @@ enum Rws {
         signing: Signing,
     },
     /// Record an event envelope (Stage 0): JSON payload, provenance, lifecycle, CID, signature.
-    Envelope {
+    EventEnvelope {
         /// JSON payload file, or `-` for stdin. Alternative to `--data`.
         #[arg(long, conflicts_with = "data")]
         payload: Option<PathBuf>,
@@ -710,7 +710,7 @@ fn to_request(cmd: Rws) -> Result<Request> {
                 },
             ),
         },
-        Rws::Envelope {
+        Rws::EventEnvelope {
             payload,
             data,
             source,
@@ -737,7 +737,7 @@ fn to_request(cmd: Rws) -> Result<Request> {
                 serde_json::from_str(&text).context("payload is not JSON")?;
             req(
                 &signing,
-                Op::Envelope {
+                Op::EventEnvelope {
                     payload,
                     source,
                     module,

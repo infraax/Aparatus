@@ -261,7 +261,7 @@ impl Validate for Payload {
                     }
                 }
             }
-            Body::Envelope(e) => crate::envelope::validate(e)?,
+            Body::EventEnvelope(e) => crate::envelope::validate(e)?,
             Body::Correction(c) => {
                 if c.reason.trim().is_empty() {
                     return Err(rule("C-06", "correction needs a reason"));
@@ -628,7 +628,7 @@ impl State {
             Body::Event(e) => self.check_event(payload, e),
             Body::Correction(c) => self.check_correction(payload, c),
             Body::Review(r) => self.check_review(payload, r),
-            Body::Envelope(e) => self.check_envelope(e),
+            Body::EventEnvelope(e) => self.check_envelope(e),
         }
     }
 
@@ -1486,7 +1486,7 @@ impl State {
                     ticket: e.ticket.clone(),
                 });
             }
-            Body::Envelope(e) => {
+            Body::EventEnvelope(e) => {
                 self.envelope_events.insert(e.event_id.clone());
             }
             Body::Correction(_) | Body::Review(_) => {}

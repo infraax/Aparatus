@@ -11,7 +11,7 @@ Precedence: **RWS 2.0 + MAPPING overrule `docs/background/` (Design.md, Dutch Wa
 
 Rules for agents working here:
 
-- Do not invent receipt kinds beyond the eleven in RWS-2.0 X-02 plus `envelope` (NAP-corpus #12), or event kinds beyond F-02 ∪ X-12.
+- Do not invent receipt kinds beyond the eleven in RWS-2.0 X-02 plus `event_envelope` (NAP-corpus #12; see `docs/notes/ENVELOPE-STAGE-0-NOTES.md`), or event kinds beyond F-02 ∪ X-12.
 - Anything needed but out of scope goes to the current milestone's `docs/notes/M*-DEFERRED.md`, not into code.
 - Agents are clients: they write through `apparatusd` (or the CLI) and never keep the chain as their own memory.
 - `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` and `cargo build --workspace --locked` stay green.

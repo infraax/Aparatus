@@ -1,17 +1,20 @@
 # Envelope Stage 0 — typed envelope on the existing ledger
 
+Receipt kind, RPC op and CLI are named `event_envelope` / `rws event-envelope`. `envelope` alone is the RWS means
+envelope (`rws policy envelope`, `envelope_ref`) and is not a receipt kind.
+
 NAP-corpus issue #12. A layer on the M1–M3 chain: same `.apparatus/` files, same single writer,
 same SHA-256 link. Not a new ledger, not a replacement for the RWS receipt.
 
 ```text
-rws envelope / RPC op "envelope" → apparatusd (or local under LOCK) → payload_hash + cid + sign → State::check (ENV-01..05) → ledger
+rws event-envelope / RPC op "event_envelope" → apparatusd (or local under LOCK) → payload_hash + cid + sign → State::check (ENV-01..05) → ledger
 ```
 
 ## What landed
 
 | Piece | Where |
 |---|---|
-| Receipt kind `envelope` (`Body::Envelope(EventEnvelope)`) | `crates/apparatus-types/src/rws.rs` |
+| Receipt kind `event_envelope` (`Body::EventEnvelope(EventEnvelope)`) | `crates/apparatus-types/src/rws.rs` |
 | `ProvenanceKind` enum: `stated` / `measured` / `inferred` | same |
 | `Lifecycle` enum: `draft` / `signed` / `sealed` / `anchored` (stored, not enforced) | same |
 | `SignatureScheme` enum: `ed25519`, `ml_dsa_65_stub` | same |
@@ -21,19 +24,19 @@ rws envelope / RPC op "envelope" → apparatusd (or local under LOCK) → payloa
 | Envelope rules ENV-01..04, signing bytes, sign/verify | `crates/apparatus-schema/src/envelope.rs` |
 | ENV-05 (`event_id` unique on chain) | `State::check_envelope` in `crates/apparatus-schema/src/rws.rs` |
 | `Op::Envelope`, node key `.apparatus/keys/ed25519.seed` (0600, dir 0700) | `crates/apparatus-kernel/src/{api,kernel}.rs` |
-| `apparatus rws envelope` | `bins/apparatus-cli/src/main.rs` |
+| `apparatus rws event-envelope` | `bins/apparatus-cli/src/main.rs` |
 
 ## Commands
 
 ```bash
-apparatus rws envelope --payload reading.json --source sensor:bme280 --module dexos.climate --provenance measured
-apparatus rws envelope --data '{"n":1}' --source me --module dexos.notes --provenance stated --scheme ml-dsa-65-stub
-apparatus rws envelope --data '{"n":1}' --source me --module dexos.notes --provenance inferred --lifecycle draft
-echo '{"n":2}' | apparatus rws envelope --payload - --source me --module dexos.notes --provenance stated --event-id evt-2
+apparatus rws event-envelope --payload reading.json --source sensor:bme280 --module dexos.climate --provenance measured
+apparatus rws event-envelope --data '{"n":1}' --source me --module dexos.notes --provenance stated --scheme ml-dsa-65-stub
+apparatus rws event-envelope --data '{"n":1}' --source me --module dexos.notes --provenance inferred --lifecycle draft
+echo '{"n":2}' | apparatus rws event-envelope --payload - --source me --module dexos.notes --provenance stated --event-id evt-2
 ```
 
-Output: `envelope <event_id> cid <cid>` then `<receipt-id> envelope <hash>`. Exit 0 ok, 2 refused (refusal on the chain), 1 error.
-RPC: `{"op":"envelope","payload":{…},"source":"…","module":"…","provenance":"measured"}`; optional
+Output: `event_envelope <event_id> cid <cid>` then `<receipt-id> event_envelope <hash>`. Exit 0 ok, 2 refused (refusal on the chain), 1 error.
+RPC: `{"op":"event_envelope","payload":{…},"source":"…","module":"…","provenance":"measured"}`; optional
 `event_id`, `unix_timestamp`, `lifecycle`, `signature_scheme`, and client-stated `payload_hash`/`cid` (checked, ENV-03).
 
 ## Field mapping (brief → chain)
@@ -74,7 +77,8 @@ Replay (`Kernel::open`, daemon start, `check`) re-verifies every envelope signat
 
 crypto 8 (BLAKE3 vector, RFC 4648 base32, CID layout vs independent Python, RFC 8032 vector 1, tamper, stub-true, key id, framing) ·
 types 1 (wire names, closed enums) · schema 5 (sign/validate, tamper → ENV-04/03, stub, every ENV rule, key order) ·
-CLI 2 (signed/stub/draft/sealed + key mode + replay; five refusals on chain) · daemon 1 (RPC envelope, wrong CID refused on chain).
+CLI 2 (signed/stub/draft/sealed + key mode + replay; five refusals on chain) · daemon 1 (RPC event_envelope, wrong CID refused on chain).
+The old kind name `envelope` is refused at decode (types test).
 
 Daemon: `Job::Request` now boxes the request (clippy `large_enum_variant` after `Op::Envelope`). No behaviour change.
 

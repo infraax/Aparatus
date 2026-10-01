@@ -325,7 +325,7 @@ fn envelopes_over_rpc_signed_by_the_daemon_and_refused_on_chain() {
     let daemon = start(&dir);
     let mut c = client(&dir);
     let env = |payload: serde_json::Value, cid: Option<String>| {
-        as_owner(Op::Envelope {
+        as_owner(Op::EventEnvelope {
             payload,
             source: "agent:planner".into(),
             module: "dexos.plan".into(),
@@ -342,7 +342,7 @@ fn envelopes_over_rpc_signed_by_the_daemon_and_refused_on_chain() {
         .call(&env(serde_json::json!({ "step": 1 }), None))
         .unwrap();
     assert_eq!(ok.status, Status::Ok, "{ok:?}");
-    assert_eq!(ok.kind.as_deref(), Some("envelope"));
+    assert_eq!(ok.kind.as_deref(), Some("event_envelope"));
     assert!(
         dir.join(".apparatus/keys/ed25519.seed").exists(),
         "the daemon (the only writer) owns the key"

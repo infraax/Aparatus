@@ -83,6 +83,14 @@ The tag was not pushed this time, as instructed. It now waits on Dex in **#35**:
 | Aparatus #23 and #31 (both split; the tag went to #35) | Aparatus #35 (tag) | NAP #18 (left open, needs a second node) |
 | NAP #12 (split → #38), #13, #7, #8, #23, #21 (split → #39), #1 (split → #37) | NAP #37 (N=7 and state sync), #38 (ingest → event_envelope), #39 (money states) | NAP #14, #15, #9, #10, #4: "deferred, not this session", still open |
 
+### Later landings (2026-10-01, same session): code plus docs, each gated
+
+| PR | Gate | Tests | `main` after merge |
+|---|---|---|---|
+| #36 `apparatus mcp serve` (stdio MCP bridge, mcp-gate client), M6.md, CANISTERS.md | dev-check.sh | 100/0 | `887232f4c713831e9c67681f5478da1350ef08c3` |
+| #37 `rws quarantine --osv` (live OSV / RustSec / GHSA → Advice) | dev-check.sh | 102/0 | `2aa8d6525f5d3788bcb5cb71754e5b4586cbb7b5` |
+| this PR: SESSION-METRICS.md and this table | dev-check.sh | 102/0 | (see the PR merge) |
+
 ## NAP-corpus
 
 | Order | PR | Head | `main` after merge |
@@ -105,5 +113,12 @@ Hashes rebuilt from the merged `main` match what is installed:
 
 - daily root: `71a24604fa46b176616d8fad19e8f81b63b91a953be2ae84650fd9c2983b18e6`
 - notary: `2001a55538db6c8b39812bb01469bd1bd1ca94fa45931ea93d64c06ff81855a4`
+
+| 6 | #40 Lifeline and policy book v5 | `dc5e39f` | `e6890ec4f118e240c9f27f494ffad41f884a6f37` |
+| 7 | #41 INSTALL-ORDER.md, the order that runs | `b4a69dd` | `e77fcb5e51e3e891aeaa309825bc7afb7bd55a5b` |
+| 8 | #42 Ledger mirror and identity register canisters | `12dd55d` | `45dddc853a73b7fff21283dec8ee57a6d23e0c9c` |
+| 9 | #43 Public groups 1–4 locally, group 6 reinstalled | `d1d8743` | `169b763bbd2004984cf71301078871dceba06fb5` |
+| 10 | #44 mcp-gate canister | `b7d5ad4` | `800066537e217aa32e8ae12fd11cd7843c0c94e5` |
+| 11 | #45 CORRECTIONS.md and the implemented-vs-analogy table | `587a730` | **`f7ea26112bba4c20a7020bae0856f81ca30482cb`** |
 
 The three research files are unchanged. NAP-corpus has no Rust gates; its canister tests run against the replica (see DEV-PATH.md).

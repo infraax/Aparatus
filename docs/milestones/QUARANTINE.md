@@ -13,6 +13,7 @@ scripts/quarantine.sh --wait-days 0 --reason "…"        # override: written as
 ## The wait
 
 - **Default: 5 days** (`DEFAULT_WAIT_DAYS`), measured from the registry publish time to the writer's clock.
+  When the registry gives no publish time, the wait counts from the local first sight (below).
 - A pin younger than the wait is `waiting`. The previous adopted version of that package stays adopted (shown as
   `adopted stays <version>` and stored in the receipt's `adopted` field). Nothing is downgraded or rewritten.
 - `--wait-days N` other than 5 needs `--reason`; without it the command exits 1 and records nothing (no silent zero).
@@ -23,13 +24,23 @@ scripts/quarantine.sh --wait-days 0 --reason "…"        # override: written as
 | Case | Receipt | Rule |
 |---|---|---|
 | Pin hash matches the registry, age ≥ wait | `event_envelope` `quarantine:<eco>:<name>@<version>:adopted` | measured, evidence **B**, source = registry URL, payload `{ecosystem, name, version, integrity, published_at, age_days, wait_days, status, lockfile}` |
-| Hash matches, age < wait (or unknown) | same, `…:waiting`, plus `adopted` = previous adopted version or null | |
+| Hash matches, age < wait | same, `…:waiting`, plus `adopted` = previous adopted version or null | |
+| First sight of a version not yet adopted | `event_envelope` `…:seen`, payload `{registry_integrity, registry, published_at, first_seen_at}` | measured, evidence **B** (the witness, B1.8) |
+| Registry hash ≠ the hash it had at first sight | `illegal_transition_rejected` | **Q-01**, exit 2 |
 | Lockfile hash ≠ registry hash, or ≠ the hash already recorded on the chain | `illegal_transition_rejected` | **Q-01**, exit 2 |
 | Registry has no hash for the pin (not found, offline) | `illegal_transition_rejected` | **Q-02**, exit 2 |
 | Advisory in the feed matches a pin | `advice` (addressed to `policy`, inputs = the pin receipt) | not applied: advice is not policy |
 
 Each pin is recorded once per state. A rescan records only new pins, new states (waiting → adopted) and refusals.
 The hash is checked on **every** scan, including pins already adopted.
+
+## Registry-hash witness (B1.8, 2026-10-02)
+
+The 5-day wait trusts the registry's own publish time. The witness adds evidence that does not:
+- The first time a version is seen (and not yet adopted), the writer records the registry's hash and its own clock (`first_seen_at`).
+- A registry that later serves a different hash for the same version is refused (Q-01), even if the lockfile follows it.
+- A version without a publish time is no longer stuck in `waiting`: it waits 5 days from first sight.
+- `adopted` and `waiting` receipts now carry `first_seen_at`. Adopted pins get no witness (their hash is already on the chain).
 
 ## Registries
 
@@ -139,5 +150,5 @@ docs/fixtures/osv-live/Cargo.lock: OK
 - CLI: `quarantine_young_version_waits_and_keeps_previous_pin`, `quarantine_hash_mismatch_is_refused_on_chain`
   (incl. Q-02 and the adopted-pin regression), `quarantine_advisory_writes_advice_and_leaves_lockfile`,
   `quarantine_wait_override_needs_a_reason_and_is_recorded`.
-- Daemon: `quarantine_over_rpc_records_and_refuses`.
+- Daemon: `quarantine_over_rpc_records_and_refuses`, `quarantine_witness_records_first_sight_and_refuses_a_changed_registry_hash`.
 - Parsers: Cargo.lock, package-lock.json v3 (and v1 refused), pnpm-lock.yaml v9, sparse-index path and versions.

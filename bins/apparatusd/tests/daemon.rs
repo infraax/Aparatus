@@ -500,3 +500,53 @@ fn quarantine_over_rpc_records_and_refuses() {
     assert!(terminate(daemon).success());
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn quarantine_witness_records_first_sight_and_refuses_a_changed_registry_hash() {
+    use apparatus_types::quarantine::{Ecosystem, PinObservation};
+    let dir = solo_project("qw");
+    let daemon = start(&dir);
+    let mut c = client(&dir);
+    // No publish time from the registry: the wait counts from our own first sight.
+    let pin = |lock: &str, reg: &str| PinObservation {
+        ecosystem: Ecosystem::Npm,
+        name: "left-pad".into(),
+        version: "9.9.9".into(),
+        lock_integrity: lock.into(),
+        registry_integrity: Some(reg.into()),
+        published_at: None,
+        registry: "fixture:test".into(),
+        lookup_error: None,
+        lockfile: "package-lock.json".into(),
+    };
+    let scan = |c: &mut Client, p: PinObservation| {
+        c.call(&as_owner(Op::Quarantine {
+            wait_days: 5,
+            override_reason: None,
+            pins: vec![p],
+            advisories: vec![],
+        }))
+        .unwrap()
+    };
+    let r = scan(&mut c, pin("aa", "aa"));
+    assert!(r.lines.iter().any(|l| l.contains("1 first seen")), "{r:?}");
+    assert!(
+        r.lines.iter().any(|l| l.contains("waiting (age 0d")),
+        "{r:?}"
+    );
+    // Seen once: a second scan writes no second witness.
+    let r = scan(&mut c, pin("aa", "aa"));
+    assert!(r.lines.iter().any(|l| l.contains("0 first seen")), "{r:?}");
+    // The registry now serves another hash for the same version, and the lockfile follows it.
+    let r = scan(&mut c, pin("bb", "bb"));
+    assert_eq!(r.status, Status::Refused, "{r:?}");
+    assert_eq!(r.rule.as_deref(), Some("Q-01"));
+    assert!(
+        r.lines
+            .iter()
+            .any(|l| l.contains("registry hash changed since first seen")),
+        "{r:?}"
+    );
+    assert!(terminate(daemon).success());
+    std::fs::remove_dir_all(dir).ok();
+}

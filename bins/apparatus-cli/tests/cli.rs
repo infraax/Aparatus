@@ -1009,10 +1009,21 @@ fn quarantine(dir: &Path, lock: &Path, reg: &Path, extra: &[&str]) -> Output {
     run(dir, &args)
 }
 
+/// Quarantine decisions (adopted / waiting / override / refused), without the first-seen witnesses.
 fn quarantine_envelopes(dir: &Path) -> Vec<serde_json::Value> {
     ledger_envelopes(dir)
         .into_iter()
         .filter(|e| e["module"] == "apparatus.quarantine")
+        .filter(|e| !e["event_id"].as_str().unwrap_or("").ends_with(":seen"))
+        .collect()
+}
+
+/// The registry-hash witnesses (B1.8): one per package version, first sight only.
+fn quarantine_witnesses(dir: &Path) -> Vec<serde_json::Value> {
+    ledger_envelopes(dir)
+        .into_iter()
+        .filter(|e| e["module"] == "apparatus.quarantine")
+        .filter(|e| e["event_id"].as_str().unwrap_or("").ends_with(":seen"))
         .collect()
 }
 
@@ -1058,6 +1069,10 @@ fn quarantine_young_version_waits_and_keeps_previous_pin() {
     assert_eq!(envs[0]["evidence_tag"], "B");
     assert_eq!(envs[0]["payload"]["integrity"], "aa");
     assert_eq!(envs[1]["payload"]["status"], "waiting");
+    let seen = quarantine_witnesses(&dir);
+    assert_eq!(seen.len(), 2, "one witness per version");
+    assert_eq!(seen[1]["event_id"], "quarantine:cargo:foo@1.1.0:seen");
+    assert_eq!(seen[1]["payload"]["registry_integrity"], "bb");
     assert_eq!(envs[1]["payload"]["adopted"], "1.0.0");
 
     // A rescan records nothing new.
@@ -1157,8 +1172,8 @@ fn quarantine_advisory_writes_advice_and_leaves_lockfile() {
     assert!(summary.contains("not applied"));
     assert_eq!(
         advice[0]["inputs"].as_array().unwrap().len(),
-        1,
-        "links the pin receipt"
+        2,
+        "links the pin receipt and its first-seen witness"
     );
     // Advice is not policy: no policy receipt beyond init, nothing adopted differently.
     assert_eq!(ledger.iter().filter(|p| p["kind"] == "policy").count(), 0);

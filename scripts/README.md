@@ -24,6 +24,8 @@ scripts/dev-check.sh   # the four gates, any time
 | `dev-up.sh` | Builds `apparatus` and `apparatusd` (`--locked`), runs `rws init --solo` once if `.apparatus/` is empty, starts `apparatusd --project <repo>`, prints the socket path (`.apparatus/apparatusd.sock`, mode 0600). | Start a second daemon (prints the running one instead). |
 | `dev-down.sh` | SIGTERM to that `apparatusd` (finishes queued requests, removes the socket). | Touch any other process. |
 | `quarantine.sh` | Starts apparatusd if needed (`dev-up.sh`), then `rws quarantine` over the socket: records every lockfile pin (hash, age) as a measured `event_envelope`, keeps versions younger than 5 days `waiting`, refuses hash mismatches on the chain (exit 2), writes Advice for feed matches. See `docs/milestones/QUARANTINE.md`. | Write or update any lockfile; apply an advisory; skip the wait silently (`--wait-days` needs `--reason` and is recorded). |
+| `node-up.sh` | Any Linux node (VPS, anker, Pi, laptop): measure, tier from NAP-corpus `NODES.md`, optional toolchain (`--bootstrap` → `node-bootstrap.sh`) and systemd `--user` units (`--units` → `node-units.sh`), node key, Tailscale join with `TS_AUTHKEY`, local `node.json`. Dry run unless `--apply`. See `docs/homelab/NODE-UP.md`. | Open a public port; download the replica; invent a Tailscale key; apply on simulated numbers; run on a 32-bit OS. |
+| `vps-up.sh` | `node-up.sh --role vps` (kept for `docs/homelab/VPS.md`). | — |
 | `dev-check.sh` | `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `cargo build --workspace --locked`. Stops at the first failure. | — |
 
 `rws ic status` (not a script): reads `http://127.0.0.1:8080/api/v2/status` through ic-agent and writes one measured

@@ -1,6 +1,6 @@
 # Drop-in VPS install (Aparatus #39)
 
-`scripts/vps-up.sh`. Order: measure → refuse → install plan → keys → Tailscale → local record.
+`scripts/vps-up.sh` = `scripts/node-up.sh --role vps` (any Linux node: [NODE-UP.md](NODE-UP.md)). Order: measure → refuse → install plan → keys → Tailscale → local record.
 
 ## What Dex pastes
 

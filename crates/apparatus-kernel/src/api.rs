@@ -1353,7 +1353,7 @@ fn quarantine(
 ) -> Result<Response> {
     let mut lines = vec![];
     let mut refusals: Vec<(&'static str, String)> = vec![];
-    let (mut adopted, mut waiting, mut skipped, mut advised) = (0, 0, 0, 0);
+    let (mut adopted, mut waiting, mut skipped, mut advised, mut witnessed) = (0, 0, 0, 0, 0);
     let push =
         |lines: &mut Vec<String>, refusals: &mut Vec<(&'static str, String)>, s: Submit| match s {
             Submit::Accepted { id, kind, hash } => lines.push(line(id, kind, &hash)),
@@ -1421,6 +1421,19 @@ fn quarantine(
                 .and_then(|e| e.payload.get("integrity").and_then(|v| v.as_str()))
                 .map(String::from)
         });
+        // Local registry-hash witness (B1.8): the registry hash and our own clock the first time
+        // this version was seen. A registry that later serves another hash for it is refused, and
+        // a version without a publish time waits from first sight.
+        let seen_id = format!("{base}:seen");
+        let seen = k.state.event_envelope(&seen_id).map(|e| {
+            (
+                e.payload
+                    .get("registry_integrity")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                e.payload.get("first_seen_at").and_then(|v| v.as_u64()),
+            )
+        });
         let refusal = match &p.registry_integrity {
             None => Some((
                 "Q-02",
@@ -1437,6 +1450,22 @@ fn quarantine(
                     p.lockfile, p.lock_integrity, p.registry
                 ),
             )),
+            Some(reg)
+                if seen
+                    .as_ref()
+                    .and_then(|s| s.0.as_deref())
+                    .is_some_and(|h| !h.eq_ignore_ascii_case(reg)) =>
+            {
+                Some((
+                    "Q-01",
+                    format!(
+                        "{pin} registry hash changed since first seen at {}: was {}, {} now has {reg}",
+                        seen.as_ref().and_then(|s| s.1).unwrap_or(0),
+                        seen.as_ref().and_then(|s| s.0.clone()).unwrap_or_default(),
+                        p.registry
+                    ),
+                ))
+            }
             Some(_) => match &recorded {
                 Some(r) if !r.eq_ignore_ascii_case(&p.lock_integrity) => Some((
                     "Q-01",
@@ -1483,8 +1512,35 @@ fn quarantine(
             skipped += 1;
             continue;
         }
-        let age = p.published_at.map(|t| now.saturating_sub(t));
-        let is_adopted = age.is_some_and(|a| a >= wait_secs);
+        let first_seen = match seen.as_ref().and_then(|s| s.1) {
+            Some(t) => t,
+            None => {
+                let op = envelope(
+                    seen_id,
+                    p.registry.clone(),
+                    ProvenanceKind::Measured,
+                    Some(EvidenceTag::B),
+                    serde_json::json!({
+                        "ecosystem": p.ecosystem,
+                        "name": p.name,
+                        "version": p.version,
+                        "registry_integrity": p.registry_integrity,
+                        "registry": p.registry,
+                        "published_at": p.published_at,
+                        "first_seen_at": now,
+                    }),
+                );
+                let (_, results) = write(k, signer, signer_name, role, producer_kind, op)?;
+                for r in results {
+                    push(&mut lines, &mut refusals, r);
+                }
+                witnessed += 1;
+                now
+            }
+        };
+        // The registry's publish time when it gives one; otherwise our own first sight.
+        let age = now.saturating_sub(p.published_at.unwrap_or(first_seen));
+        let is_adopted = age >= wait_secs;
         let status = if is_adopted { "adopted" } else { "waiting" };
         let event_id = format!("{base}:{status}");
         if k.state.has_envelope_event(&event_id) {
@@ -1510,7 +1566,8 @@ fn quarantine(
             "version": p.version,
             "integrity": p.lock_integrity,
             "published_at": p.published_at,
-            "age_days": age.map(|a| a / 86_400),
+            "first_seen_at": first_seen,
+            "age_days": age / 86_400,
             "wait_days": wait_days,
             "status": status,
             "lockfile": p.lockfile,
@@ -1518,8 +1575,8 @@ fn quarantine(
         if !is_adopted {
             payload["adopted"] = serde_json::json!(previous);
             lines.push(format!(
-                "pin {pin} waiting (age {} < {wait_days}d); adopted stays {}",
-                age.map_or("unknown".into(), |a| format!("{}d", a / 86_400)),
+                "pin {pin} waiting (age {}d < {wait_days}d); adopted stays {}",
+                age / 86_400,
                 previous.as_deref().unwrap_or("none")
             ));
             waiting += 1;
@@ -1600,7 +1657,7 @@ fn quarantine(
     }
 
     lines.push(format!(
-        "quarantine: {} pins, {adopted} adopted, {waiting} waiting, {} refused, {skipped} already recorded, {advised} advice; lockfiles not modified",
+        "quarantine: {} pins, {adopted} adopted, {waiting} waiting, {} refused, {skipped} already recorded, {witnessed} first seen, {advised} advice; lockfiles not modified",
         pins.len(),
         refusals.len()
     ));

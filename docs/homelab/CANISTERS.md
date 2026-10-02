@@ -2,7 +2,7 @@
 
 All of these run on the local N=1 replica from `scripts/ic-up.sh`. They are not deployed to mainnet, and no cycles were spent.
 
-- **Sources:** NAP-corpus `docs/ic/canisters/` (Motoko, mops, moc 1.6.0, `core` 2.6.2, `sha2` 0.2.5).
+- **Sources:** NAP-corpus `docs/ic/canisters/` (Motoko, mops; one toolchain in `mops.toml`: moc 1.16.1 since Batch 1, `core` 2.6.2, `sha2` 0.2.5; layout in its `README.md`).
 - **Installer:** NAP-corpus `docs/ic/canisters/tools/ic-install` (ic-agent 0.49.2). No dfx.
 - **Order:** `docs/ic/canisters/INSTALL-ORDER.md` and `install-order.sh`.
 
